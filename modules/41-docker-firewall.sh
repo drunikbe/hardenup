@@ -49,7 +49,7 @@ configure_docker_firewall() {
 }
 
 check_docker_firewall() {
-    iptables -L DOCKER-USER -n 2>/dev/null | grep -q "cloud-init:docker-firewall"
+    iptables -L DOCKER-USER -n 2>/dev/null | grep -q "hardenup:docker-firewall"
 }
 
 verify_docker_firewall() {
@@ -74,18 +74,18 @@ EOF
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent
 
     # Flush our previously-tagged rules if re-running.
-    while iptables -D DOCKER-USER -m comment --comment "cloud-init:docker-firewall" -j RETURN 2>/dev/null; do :; done
-    while iptables -D DOCKER-USER -m comment --comment "cloud-init:docker-firewall" -j DROP 2>/dev/null; do :; done
+    while iptables -D DOCKER-USER -m comment --comment "hardenup:docker-firewall" -j RETURN 2>/dev/null; do :; done
+    while iptables -D DOCKER-USER -m comment --comment "hardenup:docker-firewall" -j DROP 2>/dev/null; do :; done
 
     local priv_cidr
     priv_cidr="$(state_get NET_PRIVATE_CIDR)"
     if [[ -n "$priv_cidr" ]]; then
         iptables -I DOCKER-USER -s "$priv_cidr" \
-            -m comment --comment "cloud-init:docker-firewall" -j RETURN
+            -m comment --comment "hardenup:docker-firewall" -j RETURN
     fi
     iptables -I DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED \
-        -m comment --comment "cloud-init:docker-firewall" -j RETURN
-    iptables -A DOCKER-USER -m comment --comment "cloud-init:docker-firewall" -j DROP
+        -m comment --comment "hardenup:docker-firewall" -j RETURN
+    iptables -A DOCKER-USER -m comment --comment "hardenup:docker-firewall" -j DROP
 
     netfilter-persistent save >/dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4
     log "Docker firewall configured; ip_forward=1; private allow: ${priv_cidr:-none}"

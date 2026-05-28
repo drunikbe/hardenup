@@ -55,7 +55,7 @@ This is how the profile gating was eliminated: `40-runtime.sh` unconditionally a
 
 ## State model
 
-`/run/cloud-init-scripts/state.env` (0600, tmpfs) holds everything for the duration of the run:
+`/run/hardenup/state.env` (0600, tmpfs) holds everything for the duration of the run:
 
 - Operator answers (hostname, user name, SSH key, ports, CIDRs).
 - Generated secrets (RKE2 token, Grafana admin password, CrowdSec bouncer key, Rancher bootstrap password, SSH Ed25519 pubkey).
@@ -75,11 +75,11 @@ State.env holds secrets while the wizard is running. The terminal `99-finalize.s
 - CrowdSec bouncer key: in the ingress-nginx ConfigMap / Lua init container env.
 - SSH host key: `~/.ssh/id_ed25519.pub`.
 
-Step 99's verify asserts that `/run/cloud-init-scripts/` no longer exists. If deletion fails, the wizard exits non-zero with a loud message — secrets on tmpfs are still gone at reboot, but manual cleanup is safer.
+Step 99's verify asserts that `/run/hardenup/` no longer exists. If deletion fails, the wizard exits non-zero with a loud message — secrets on tmpfs are still gone at reboot, but manual cleanup is safer.
 
 ### Gotcha: `/run` is tmpfs
 
-`/run/cloud-init-scripts/state.env` disappears on reboot. If the operator expects to interrupt the wizard and continue across a full machine reboot, they have to re-walk completed steps. Acceptable tradeoff — tmpfs is the right home for mid-run secrets.
+`/run/hardenup/state.env` disappears on reboot. If the operator expects to interrupt the wizard and continue across a full machine reboot, they have to re-walk completed steps. Acceptable tradeoff — tmpfs is the right home for mid-run secrets.
 
 ---
 

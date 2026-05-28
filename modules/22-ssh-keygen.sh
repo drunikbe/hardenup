@@ -110,7 +110,7 @@ _generate_for() {
     fi
 
     local comment
-    comment="cloud-init@$(hostname)-$(date -u +%Y-%m-%d)"
+    comment="hardenup@$(hostname)-$(date -u +%Y-%m-%d)"
     # -N "" = no passphrase; unattended-use pattern.
     sudo -u "$owner" ssh-keygen -t ed25519 -N "" -C "$comment" -f "$key" >/dev/null
     log "Generated Ed25519 keypair for $owner: $key"

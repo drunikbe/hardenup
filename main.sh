@@ -18,7 +18,7 @@
 #      state is preserved so the next invocation resumes at this step.
 #   7. Mark step completed with an ISO timestamp, move to next.
 #
-# State lives at /run/cloud-init-scripts/state.env for the full run. It
+# State lives at /run/hardenup/state.env for the full run. It
 # survives Ctrl+C / lost connections / failed steps, so re-running resumes
 # at the first incomplete step. The terminal 99-finalize.sh step prints
 # generated secrets to stdout and wipes the state file.
@@ -129,7 +129,7 @@ if [[ $RESET -eq 1 ]]; then
     # Refuse STATE_DIR overrides — rm -rf on an operator-supplied path is a
     # footgun (STATE_DIR=/etc sudo ./main.sh --reset would rm -rf /etc). If
     # the override was intentional, the operator can wipe it manually.
-    if [[ "$STATE_DIR" != "/run/cloud-init-scripts" ]]; then
+    if [[ "$STATE_DIR" != "/run/hardenup" ]]; then
         err "--reset refuses: STATE_DIR has been overridden ($STATE_DIR)."
         err "If intentional, clean it up manually: rm -rf $STATE_DIR"
         exit 1

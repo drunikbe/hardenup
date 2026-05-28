@@ -25,10 +25,10 @@ detect_finalize()  { return 0; }
 
 configure_finalize() {
     info "Prints generated secrets (RKE2 token, Grafana/Rancher passwords, etc.)"
-    info "for you to save, then wipes /run/cloud-init-scripts/state.env."
+    info "for you to save, then wipes /run/hardenup/state.env."
     if ! ask_yesno "Run the finalize step (print secrets + wipe state)?" "y"; then
         state_mark_skipped finalize
-        warn "Skipping finalize — state.env will remain at /run/cloud-init-scripts/."
+        warn "Skipping finalize — state.env will remain at /run/hardenup/."
         warn "Secrets stay on tmpfs (gone at next reboot). Run finalize manually when ready."
         return 0
     fi

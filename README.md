@@ -1,4 +1,4 @@
-# cloud-init
+# hardenup
 
 Provision a hardened Ubuntu 24.04 VPS for running Docker or Podman containers behind a Let's Encrypt-fronted reverse proxy — SSH hardening, firewall, intrusion detection, sensible kernel and logging defaults, all interactive. Optional Kubernetes (RKE2) path for operators who need it.
 
@@ -27,8 +27,8 @@ Optional (step 60, default `n`): turn this host into an **RKE2 Kubernetes node**
 ## Quick start
 
 ```bash
-git clone https://github.com/elfensky/cloud-init.git /opt/cloud-init
-cd /opt/cloud-init
+git clone https://github.com/drunikbe/hardenup.git /opt/hardenup
+cd /opt/hardenup
 sudo ./main.sh
 ```
 
@@ -51,7 +51,7 @@ sudo ./main.sh --force-reset                    # --reset without confirmation
 
 ## How the wizard works
 
-State lives at `/run/cloud-init-scripts/state.env` (tmpfs, 0600, root-only) for the duration of the run. If the wizard is interrupted (Ctrl+C, lost SSH, failed step), the file stays and the next `sudo ./main.sh` picks up where you left off:
+State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the duration of the run. If the wizard is interrupted (Ctrl+C, lost SSH, failed step), the file stays and the next `sudo ./main.sh` picks up where you left off:
 
 - Completed steps show as `✓ <name> [done at <timestamp>]` and are skipped.
 - Skipped steps (answered `n` previously) re-prompt so you can reconsider.

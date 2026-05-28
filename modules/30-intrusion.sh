@@ -118,7 +118,7 @@ _run_crowdsec() {
 name: cloud/private-whitelist
 description: "Whitelist intra-server private CIDR"
 whitelist:
-  reason: "private network (cloud-init)"
+  reason: "private network (hardenup)"
   cidr:
     - "${priv_cidr}"
 EOF

@@ -3,7 +3,7 @@
 # state.sh — Wizard state helpers for main.sh
 # =============================================================================
 #
-# State lives at /run/cloud-init-scripts/state.env (tmpfs, mode 0600). It is
+# State lives at /run/hardenup/state.env (tmpfs, mode 0600). It is
 # populated incrementally as the wizard walks each step and holds EVERYTHING
 # needed for the run: operator answers, generated secrets, step completion
 # flags.
@@ -40,7 +40,7 @@
 [[ -n "${_STATE_SH_LOADED:-}" ]] && return 0
 _STATE_SH_LOADED=1
 
-STATE_DIR="${STATE_DIR:-/run/cloud-init-scripts}"
+STATE_DIR="${STATE_DIR:-/run/hardenup}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.env}"
 
 # Initialize the state directory and (empty) state file. Safe to re-run.
