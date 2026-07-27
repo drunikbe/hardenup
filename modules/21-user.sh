@@ -114,6 +114,7 @@ run_user() {
     if id "$u" &>/dev/null; then
         warn "User '$u' already exists. Skipping creation."
     else
+        record_user_created "$u"
         adduser --disabled-password --gecos "" "$u"
         log "User '$u' created."
     fi

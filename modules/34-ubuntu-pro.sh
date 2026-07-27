@@ -37,6 +37,7 @@ run_ubuntu_pro() {
         warn "Ubuntu Pro enabled but no token provided; skipping."
         return 0
     fi
+    record_note "Ubuntu Pro attached — detach with: sudo pro detach (also frees the seat on your Canonical account)"
     pro attach "$token" || warn "Ubuntu Pro attachment failed."
     log "Ubuntu Pro attached"
 }

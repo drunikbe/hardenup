@@ -75,6 +75,8 @@ check_intrusion() {
 verify_intrusion() { check_intrusion; }
 
 _run_fail2ban() {
+    record_pkg_installed fail2ban
+    record_service_enabled fail2ban
     apt-get install -y -qq fail2ban 2>/dev/null
 
     local ssh_port priv_cidr ignore
@@ -83,6 +85,7 @@ _run_fail2ban() {
     ignore="127.0.0.1/8 ::1"
     [[ -n "$priv_cidr" ]] && ignore+=" $priv_cidr"
 
+    backup_file /etc/fail2ban/jail.local
     cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 bantime  = 3600
@@ -108,13 +111,17 @@ EOF
 _run_crowdsec() {
     # Official installer script sets up the repository and apt key.
     curl -s https://install.crowdsec.net | bash
+    record_pkg_installed crowdsec
+    record_pkg_installed crowdsec-firewall-bouncer-iptables
+    record_service_enabled crowdsec
     apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables
 
     local priv_cidr
     priv_cidr="$(state_get NET_PRIVATE_CIDR)"
     if [[ -n "$priv_cidr" ]]; then
         mkdir -p /etc/crowdsec/parsers/s02-enrich
-        cat > /etc/crowdsec/parsers/s02-enrich/private-whitelist.yaml <<EOF
+        backup_file /etc/crowdsec/parsers/s02-enrich/private-whitelist.yaml
+    cat > /etc/crowdsec/parsers/s02-enrich/private-whitelist.yaml <<EOF
 name: cloud/private-whitelist
 description: "Whitelist intra-server private CIDR"
 whitelist:

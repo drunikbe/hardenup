@@ -12,6 +12,7 @@ One entry point — `sudo ./main.sh` — walks through each capability in order.
 - Intrusion detection: fail2ban or CrowdSec — with sensible collections preinstalled for crowdsec (`linux`, `sshd`, `http-cve`, ...).
 - Kernel hardening baseline (ASLR, SYN cookies, no source routing) + journald disk cap + UTC/NTP + unattended security upgrades (optional email notifications through a small MTA).
 - Docker daemon log rotation, so container logs can't silently fill the disk.
+- **Reversible**: originals of every touched file are preserved and `./undo.sh` puts them back.
 - Optional **Docker Swarm** setup: cluster ports scoped to your node subnet, swarm init/join, and join tokens printed before the state file is wiped.
 - **Docker Engine** (default, from `docker.com`) or **Podman** (rootless, daemonless). If Docker: either the `DOCKER-USER` iptables hardening or "I handle port exposure via my cloud provider's firewall".
 
@@ -111,6 +112,30 @@ docker service create --name cloudflared \
 Point each public hostname at `http://<service-name>:<port>` in the tunnel's ingress rules. Two replicas give you a highly-available tunnel across swarm nodes.
 
 > If you need a CF-independent fallback (host nginx/OpenResty/Apache + Let's Encrypt), that code is preserved on the [`k8s` branch](https://github.com/drunikbe/hardenup/tree/k8s) — it was removed from this tree in #7, not deleted.
+
+## Undoing a run
+
+hardenup preserves the original of every file it touches, and records what it changed:
+
+- `/var/backups/hardenup/originals/` — each file exactly as it was before hardenup first touched it, in a mirrored tree (`/etc/ufw/user.rules` → `originals/etc/ufw/user.rules`).
+- `/var/lib/hardenup/manifest.tsv` — append-only log of files modified/created, packages installed, services enabled, users created.
+
+Both live outside `/run`, so they survive reboots and the state-file wipe at step 99.
+
+```bash
+sudo ./undo.sh --dry-run   # show what would be reverted; changes nothing
+sudo ./undo.sh             # restore originals, asking before each change
+sudo ./undo.sh --yes       # no per-item prompts
+sudo ./undo.sh --packages  # ALSO remove packages hardenup installed
+```
+
+The original is captured on **first touch only**, keyed by path across all runs — so re-running a step (or `--redo`) never overwrites the pristine copy with an already-modified one.
+
+Deliberately not automatic:
+
+- **Packages** are opt-in (`--packages`). Removing `docker-ce` takes every container with it. Only packages hardenup itself installed are ever candidates — anything already present is never recorded as ours.
+- **Users are never deleted** — `userdel -r` destroys a home directory. They're listed for you.
+- **Ubuntu Pro and Swarm membership** are recorded as notes, not reversed: both have effects off this machine (a seat on your Canonical account, a node in the cluster's Raft state).
 
 ## Files
 

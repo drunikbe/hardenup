@@ -41,6 +41,7 @@ verify_sysctl() {
 }
 
 run_sysctl() {
+    backup_file /etc/sysctl.d/99-hardening.conf
     cat > /etc/sysctl.d/99-hardening.conf <<'SYSEOF'
 # IP Spoofing protection
 net.ipv4.conf.all.rp_filter = 1
@@ -78,6 +79,7 @@ kernel.randomize_va_space = 2
 SYSEOF
 
     # Disable core dumps — core files can leak sensitive memory (keys, etc.).
+    backup_file /etc/security/limits.d/99-disable-core-dumps.conf
     cat > /etc/security/limits.d/99-disable-core-dumps.conf <<'EOF'
 * hard core 0
 * soft core 0

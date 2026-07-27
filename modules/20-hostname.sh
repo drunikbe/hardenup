@@ -42,6 +42,9 @@ check_hostname() {
 run_hostname() {
     local fqdn
     fqdn="$(state_get HOSTNAME_FQDN)"
+    backup_file /etc/hostname
+    backup_file /etc/hosts
+    record_note "hostname changed to ${fqdn} (previous value in the /etc/hostname backup)"
     hostnamectl set-hostname "$fqdn"
     log "Hostname set to: $fqdn"
 }

@@ -219,6 +219,7 @@ _run_swarm_init() {
     state_set SWARM_TOKEN_MANAGER "$(docker swarm join-token -q manager 2>/dev/null || true)"
     state_set SWARM_ROLE manager
     state_set SWARM_JOINED yes
+    record_note "this node initialized a Docker Swarm as manager (leave with: docker swarm leave --force)"
 
     log "Swarm initialized; this node is the first manager (${addr})."
     log "Join tokens are held in state and printed again at step 99."
@@ -241,6 +242,7 @@ _run_swarm_join() {
 
     state_set SWARM_ROLE "$role"
     state_set SWARM_JOINED yes
+    record_note "this node joined a Docker Swarm as ${role} — remove it cluster-side too: docker node rm <id>"
     log "Joined swarm at ${addr} as ${role}."
 }
 

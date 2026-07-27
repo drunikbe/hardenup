@@ -120,9 +120,11 @@ run_docker_daemon() {
 
     # jq comes from 23-packages, but this module can run standalone.
     if ! command -v jq >/dev/null 2>&1; then
+        record_pkg_installed jq
         apt-get install -y -qq jq
     fi
 
+    backup_file "$DOCKER_DAEMON_JSON"
     install -m 0755 -d /etc/docker
 
     # Merge rather than truncate: preserve registry mirrors, proxies, storage
