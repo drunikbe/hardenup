@@ -12,6 +12,7 @@ One entry point — `sudo ./main.sh` — walks through each capability in order.
 - Intrusion detection: fail2ban or CrowdSec — with sensible collections preinstalled for crowdsec (`linux`, `sshd`, `http-cve`, ...).
 - Kernel hardening baseline (ASLR, SYN cookies, no source routing) + journald disk cap + UTC/NTP + unattended security upgrades (optional email notifications through a small MTA).
 - Docker daemon log rotation, so container logs can't silently fill the disk.
+- Optional **Docker Swarm** setup: cluster ports scoped to your node subnet, swarm init/join, and join tokens printed before the state file is wiped.
 - **Docker Engine** (default, from `docker.com`) or **Podman** (rootless, daemonless). If Docker: either the `DOCKER-USER` iptables hardening or "I handle port exposure via my cloud provider's firewall".
 
 > **Kubernetes?** RKE2 and the 60–79 platform stack used to live here. They are preserved on the [`k8s` branch](https://github.com/drunikbe/hardenup/tree/k8s) and are not part of this tree — see [`docs/roadmap.md`](docs/roadmap.md).
@@ -72,7 +73,7 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 | `18` | VPN (optional) | **Tailscale** (zero-config, account required) or **WireGuard** (paste peer config from UniFi / WG-Easy / self-hosted). WireGuard path offers a one-way sub-prompt (conntrack egress block in PostUp/PreDown) so the server can respond to inbound but can't initiate outbound over the tunnel. Installed early so 24 and 25 can offer VPN-aware options. |
 | `23` | Base packages | apt update + curl, jq, git, htop, vim, tmux, unzip, net-tools. |
 | `24` | SSH hardening | Drop-in config + secondary-terminal confirm before the daemon reloads. Sub-prompt when `VPN_KIND=tailscale`: enable Tailscale SSH (identity+ACL auth, `n` default — sshd-everywhere is the simpler model). No equivalent for WireGuard. |
-| `25` | Host firewall (UFW) | HTTP/HTTPS prompt (answer `n` on a tunnel-fronted host — cloudflared needs no inbound port). Multi-network-aware with SSH scope selector: **Anywhere** (default), **No public** (block public SSH; private+VPN allowed), **VPN only** (block public AND private SSH; VPN only — ⚠ console-recovery dependency if the VPN breaks). HTTP/HTTPS independent of scope. |
+| `25` | Host firewall (UFW) | Optional Docker Swarm cluster ports (2377/tcp, 7946/tcp+udp, 4789/udp) scoped to an RFC1918 node subnet — declared here so `--redo 25-firewall` can't wipe them. HTTP/HTTPS prompt (answer `n` on a tunnel-fronted host — cloudflared needs no inbound port). Multi-network-aware with SSH scope selector: **Anywhere** (default), **No public** (block public SSH; private+VPN allowed), **VPN only** (block public AND private SSH; VPN only — ⚠ console-recovery dependency if the VPN breaks). HTTP/HTTPS independent of scope. |
 | `26` | Kernel hardening baseline | Security sysctls. `ip_forward` is set by 41 if the container runtime needs it. |
 | `27` | Journald cap | 1G / 100M / 7d |
 | `28` | Timezone + NTP | Defaults to UTC; accepts any IANA zone (`Europe/Brussels`, `America/Los_Angeles`...). |
@@ -80,8 +81,9 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 | `30` | Intrusion detection | None / fail2ban / CrowdSec. Both ignore `NET_PRIVATE_CIDR`. CrowdSec also auto-installs sensible collections. |
 | `34` | Ubuntu Pro | Optional (ESM + Livepatch). |
 | `40` | Container runtime | **Docker Engine (default)** / Podman / none. If Docker: sub-prompts for docker-group membership and UFW mitigation (`DOCKER-USER` chain or provider firewall). |
-| `41` | Docker firewall | DOCKER-USER chain + `ip_forward=1`. Runs only when Docker is chosen AND the `DOCKER-USER` mitigation is picked at step 40. Podman doesn't have the UFW-bypass problem. |
+| `41` | Docker firewall | DOCKER-USER chain + `ip_forward=1`. Drops unsolicited inbound **on the public NIC only** — container egress (cloudflared!), overlay and swarm-node traffic keep working. Installs a small systemd unit for reboot persistence, since 26.04 dropped `iptables-persistent`. |
 | `42` | Docker daemon config | Log rotation in `/etc/docker/daemon.json` (`json-file`, default 50m × 5). Docker ships **no** rotation, so container logs otherwise grow until the disk fills. Merges into an existing `daemon.json` rather than overwriting it. Requires a daemon restart — pauses for confirmation if containers are running. |
+| `43` | Docker Swarm | Optional (default `n`): initialize a new swarm (prints join tokens) or join an existing one as manager/worker. Warns about Raft quorum — go 1 manager → 3, never sit on 2. |
 | `66` | SSH peers | Optional (default `n`): pre-authorize inbound SSH keys from peer machines (Swarm nodes, backup host) so they can reach this host without a later `ssh-copy-id`. |
 | `99` | Finalize | Prints a run summary, wipes state.env, verifies the wipe. |
 

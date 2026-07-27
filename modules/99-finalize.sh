@@ -59,6 +59,32 @@ run_finalize() {
         info "  $(state_get SSH_KEYGEN_PUBKEY)"
     fi
 
+    # Swarm join tokens are real cluster credentials — the manager token grants
+    # control-plane access to whoever holds it. They live in state.env, which
+    # is wiped a few lines below, so print them and pause for the operator.
+    # They remain retrievable afterwards from any manager:
+    #   docker swarm join-token -q worker | manager
+    local tok_worker tok_manager
+    tok_worker="$(state_get SWARM_TOKEN_WORKER)"
+    tok_manager="$(state_get SWARM_TOKEN_MANAGER)"
+    if [[ -n "$tok_worker" || -n "$tok_manager" ]]; then
+        echo ""
+        warn "═══════════════════════════════════════════════════════════════"
+        warn "  SWARM JOIN TOKENS — save these; they are wiped with the state"
+        warn "═══════════════════════════════════════════════════════════════"
+        [[ -n "$tok_worker" ]] && \
+            warn "  Worker:   docker swarm join --token ${tok_worker} $(state_get SWARM_ADVERTISE_ADDR):2377"
+        [[ -n "$tok_manager" ]] && \
+            warn "  Manager:  docker swarm join --token ${tok_manager} $(state_get SWARM_ADVERTISE_ADDR):2377"
+        warn "  Re-readable on any manager: docker swarm join-token -q worker"
+        warn "═══════════════════════════════════════════════════════════════"
+        echo ""
+        info "Press Enter once you have copied the tokens above — the state"
+        info "file will then be wiped."
+        # shellcheck disable=SC2162
+        read _ack
+    fi
+
     # Wipe state.env and verify.
     if state_finalize_and_wipe; then
         log "state.env wiped ✓  ($STATE_DIR no longer exists)"

@@ -68,7 +68,71 @@ configure_firewall() {
         state_set FIREWALL_OPEN_HTTP no
     fi
 
+    _configure_swarm_ports
     _configure_ssh_scope
+}
+
+# Docker Swarm needs four node-to-node ports open between cluster members.
+# They are declared HERE rather than in 43-docker-swarm because run_firewall
+# starts with `ufw --force reset` — a rule added by a later module would be
+# silently wiped the next time anyone runs `--redo 25-firewall`. Same reason
+# the VPN interface rule lives here. All UFW state is co-located.
+#
+# 25 runs before the runtime choice at 40, so it cannot know whether Docker
+# (let alone Swarm) will be picked. Hence a direct question rather than a
+# gate on STEP_docker_SELECTED, which doesn't exist yet.
+_configure_swarm_ports() {
+    info "Docker Swarm needs four ports open between cluster nodes:"
+    info "  2377/tcp  cluster management (managers only)"
+    info "  7946/tcp + 7946/udp  node discovery / gossip"
+    info "  4789/udp  overlay network traffic (VXLAN)"
+    info "Skip this on a single-node host — nothing else needs these ports."
+    local default="n"
+    [[ "$(state_get SWARM_PORTS_ENABLED)" == "yes" ]] && default="y"
+    if ! ask_yesno "Open Docker Swarm cluster ports (2377, 7946, 4789)?" "$default"; then
+        state_set SWARM_PORTS_ENABLED no
+        return 0
+    fi
+    state_set SWARM_PORTS_ENABLED yes
+
+    # These ports MUST be scoped to the node subnet. An internet-reachable
+    # 2377 plus a leaked join token is a whole-cluster takeover, and 7946
+    # gossip is unauthenticated enough to be worth keeping off the WAN.
+    # validate_private_cidr rejects 0.0.0.0/0 and anything non-RFC1918, so
+    # the wildcard answer that would open these to the world is impossible.
+    #
+    # Default: the private CIDR when one was detected. Otherwise fall back to
+    # the public interface's own subnet — on a single-NIC LAN host (a Pi
+    # cluster, most homelabs) 15-networks classifies the only NIC as "public"
+    # because it carries the default route, even when its address is RFC1918.
+    # That host still has a perfectly good node subnet; it just isn't in
+    # NET_PRIVATE_CIDR.
+    local suggested
+    suggested="$(state_get SWARM_NODE_CIDR "$(state_get NET_PRIVATE_CIDR)")"
+    [[ -z "$suggested" ]] && suggested="$(_local_subnet_of "$(state_get NET_PUBLIC_IFACE)")"
+
+    info "Subnet the other swarm nodes live on — these four ports are opened"
+    info "ONLY to it, never to the internet. On a LAN cluster this is your LAN"
+    info "range (e.g. 10.0.0.0/24); on a cloud provider it's the private network."
+    while true; do
+        ask_input "Swarm node subnet (RFC1918 CIDR, e.g. 10.0.0.0/24)" "$suggested"
+        if validate_private_cidr "$REPLY"; then
+            state_set SWARM_NODE_CIDR "$REPLY"
+            break
+        fi
+        warn "Must be an RFC1918 CIDR (10/8, 172.16/12, 192.168/16) and not a wildcard."
+    done
+}
+
+# Echo the network address of IFACE's first IPv4 (10.0.0.169/24 → 10.0.0.0/24).
+# Empty when the interface has no address or python3 is unavailable.
+_local_subnet_of() {
+    local iface="$1" cidr
+    [[ -n "$iface" ]] || return 0
+    cidr="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | head -n1)"
+    [[ -n "$cidr" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 -c "import ipaddress;print(ipaddress.ip_network('$cidr',strict=False))" 2>/dev/null || true
 }
 
 # Asks where SSH should be reachable from. Options depend on what earlier
@@ -195,8 +259,21 @@ run_firewall() {
         ufw allow in on "$vpn_iface" comment "VPN (${vpn_kind})"
     fi
 
+    # --- Docker Swarm cluster ports ---------------------------------------------
+    # Scoped to the node subnet, never opened globally. Redundant on a host
+    # whose private allow-all already covers the same range — harmless, and it
+    # keeps the intent explicit and survives a change of private topology.
+    local swarm_cidr
+    swarm_cidr="$(state_get SWARM_NODE_CIDR)"
+    if [[ "$(state_get SWARM_PORTS_ENABLED no)" == yes && -n "$swarm_cidr" ]]; then
+        ufw allow from "$swarm_cidr" to any port 2377 proto tcp comment 'Swarm management'
+        ufw allow from "$swarm_cidr" to any port 7946 proto tcp comment 'Swarm node discovery'
+        ufw allow from "$swarm_cidr" to any port 7946 proto udp comment 'Swarm node discovery'
+        ufw allow from "$swarm_cidr" to any port 4789 proto udp comment 'Swarm overlay (VXLAN)'
+    fi
+
     ufw --force enable
-    log "UFW enabled — ssh_scope=${ssh_scope} public=${pub_if:-any} http=${open_http} private=${priv_if:-none} vpn=${vpn_kind}/${vpn_iface:-none}"
+    log "UFW enabled — ssh_scope=${ssh_scope} public=${pub_if:-any} http=${open_http} private=${priv_if:-none} vpn=${vpn_kind}/${vpn_iface:-none} swarm=${swarm_cidr:-none}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

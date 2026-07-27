@@ -135,7 +135,35 @@ clears.
 
 ### `40-runtime` / `41-docker-firewall`: Docker bypasses UFW
 
-Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UFW's rules, so bound container ports become reachable from the public internet even when UFW default-deny is set. 41 fixes this by installing explicit rules in the `DOCKER-USER` chain: allow from `NET_PRIVATE_CIDR`, then default-drop. If 41 is skipped, any `docker run -p 80:80` exposes the container publicly regardless of UFW state. Do not let anyone "simplify" this module away.
+Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UFW's rules, so bound container ports become reachable from the public internet even when UFW default-deny is set. 41 fixes this by installing explicit rules in the `DOCKER-USER` chain: allow RELATED/ESTABLISHED and the trusted node subnets, then drop. If 41 is skipped, any `docker run -p 80:80` exposes the container publicly regardless of UFW state. Do not let anyone "simplify" this module away.
+
+### `41-docker-firewall`: the DROP must stay scoped to the public interface
+
+`DOCKER-USER` sits in `FORWARD`, which carries **both** directions of container traffic. An unqualified `-j DROP` therefore kills container **egress** too — a new outbound connection matches neither RETURN rule. This module used to do exactly that, and on a single-NIC host (where 15-networks finds no private network, so there was no allow rule at all) it broke every container's outbound networking, DNS included.
+
+Verified on Ubuntu 26.04 / Docker 29.6.2: `docker run alpine wget https://...` failed with `bad address`, the DROP counter advanced, and deleting the rule fixed it instantly.
+
+That is fatal for this stack in particular: ingress is a Cloudflare Tunnel, and `cloudflared` works by dialling **out**. A rule that blocks container egress blocks the entire ingress path. Keep the `-i <public iface>` qualifier. When `NET_PUBLIC_IFACE` is unset the module deliberately installs **no** drop at all rather than an unscoped one.
+
+Related: the rule flush deletes by **line number** matched on the rule comment, not by rule spec. `iptables -D` needs the complete spec, so a spec carrying only the comment silently fails to match a rule that also has `-m conntrack ...` or `-s <cidr>` — which is why the old drain loops accumulated duplicate RETURNs on every re-run.
+
+### `41-docker-firewall`: 26.04 has no iptables-persistent
+
+Ubuntu 26.04 dropped **both** `iptables-persistent` and `netfilter-persistent` from the archive — verified on `resolute` with main/restricted/universe/multiverse enabled: no installation candidate for either, and nothing else provides the service. The old code called them unconditionally, printed "has no installation candidate", fell through to `iptables-save > /etc/iptables/rules.v4` against a directory that didn't exist, and left the DOCKER-USER rules alive only until the next reboot — i.e. the firewall silently stopped existing after a restart.
+
+41 now installs its own `hardenup-iptables.service` that restores `/etc/iptables/rules.v4` at boot, ordered `Before=docker.service` (Docker creates `DOCKER-USER` at startup; restoring into a chain it hasn't made yet fails). `iptables` on 26.04 is the nft backend and `iptables-save`/`restore` round-trip correctly through it.
+
+### `25-firewall` owns the Swarm cluster ports
+
+2377/tcp, 7946/tcp+udp and 4789/udp are declared in 25-firewall, not in 43-docker-swarm, for the same reason the VPN interface rule lives there: `run_firewall` begins with `ufw --force reset`, so a rule added by any later module is wiped the next time someone runs `--redo 25-firewall`. All UFW state is co-located.
+
+They are scoped to `SWARM_NODE_CIDR`, validated with `validate_private_cidr` so a wildcard answer is impossible. An internet-reachable 2377 plus a leaked join token is a whole-cluster takeover.
+
+Note that on a single-NIC LAN host — the Pi cluster, most homelabs — 15-networks reports `NET_HAS_PRIVATE=no`, because "private" means *RFC1918 on a non-default-route interface*. Such a host still has a perfectly good node subnet; it just isn't in `NET_PRIVATE_CIDR`, which is why the swarm prompt falls back to the public interface's own subnet rather than reusing the private one.
+
+### `43-docker-swarm`: Raft quorum
+
+Swarm managers form a Raft group with quorum `floor(N/2)+1`. **Two managers tolerate zero failures and are strictly worse than one** — either node dying takes the control plane down. Go 1 → 3 and never linger on 2. Managers must join one at a time, waiting for `Ready`; workers have no Raft membership and can join in parallel. A manager reboot is a quorum event, which is why 29-unattended tells swarm managers to decline auto-reboot.
 
 
 ---
