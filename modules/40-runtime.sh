@@ -78,6 +78,29 @@ _configure_docker() {
     state_set CONTAINER_RUNTIME docker
     state_set STEP_docker_SELECTED yes
 
+    # docker.com's step 1: conflicting packages must go before docker-ce goes
+    # on. Asked rather than done silently — this uninstalls software, which is
+    # never something a step should commit to without showing the operator.
+    # Only prompted when something actually conflicts, so the common clean-host
+    # case adds no friction.
+    local conflicts
+    conflicts="$(_docker_conflicts_installed)"
+    if [[ -n "$conflicts" ]]; then
+        info "These installed packages conflict with Docker Engine:"
+        info "  ${conflicts}"
+        info "They ship rival binaries (podman-docker and docker.io both provide"
+        info "/usr/bin/docker) or a second container runtime. docker.com's install"
+        info "guide removes them first; leaving them makes the install unreliable."
+        if ask_yesno "Remove the conflicting packages listed above?" "y"; then
+            state_set DOCKER_REMOVE_CONFLICTS yes
+        else
+            state_set DOCKER_REMOVE_CONFLICTS no
+            warn "Keeping them — 'docker' on your PATH may not be Docker Engine."
+        fi
+    else
+        state_set DOCKER_REMOVE_CONFLICTS no
+    fi
+
     local user default="n"
     user="$(state_get USER_NAME)"
     [[ -n "$user" ]] && default="y"
@@ -164,7 +187,12 @@ verify_runtime() {
 # module can run standalone before 23-packages installs it.
 _docker_repo_codename() {
     local running fallback
-    running="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+    # UBUNTU_CODENAME first, matching the official docs. On plain Ubuntu the
+    # two are identical (verified on 26.04: both `resolute`). On a derivative
+    # — Mint, Pop!_OS — VERSION_CODENAME is the derivative's own name, which
+    # docker.com never publishes; UBUNTU_CODENAME gives the Ubuntu base the
+    # repo is actually keyed on.
+    running="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")"
     [[ -z "$running" ]] && running="$(lsb_release -cs 2>/dev/null || true)"
 
     if [[ -z "$running" ]]; then
@@ -195,23 +223,92 @@ _docker_repo_codename() {
     return 1
 }
 
+# Packages docker.com says to remove before installing docker-ce, because they
+# ship conflicting binaries (most obviously /usr/bin/docker) or an incompatible
+# container runtime.
+#
+# Note what is NOT here: `containerd.io`, `docker-buildx-plugin` and
+# `docker-compose-plugin` are docker.com's OWN packages and must survive.
+# Ubuntu's near-namesakes `containerd` and `docker-buildx` are different
+# packages and do conflict. Getting that pair backwards would uninstall the
+# runtime we just asked for.
+DOCKER_CONFLICTING_PKGS=(
+    docker.io
+    docker-compose
+    docker-compose-v2
+    docker-doc
+    docker-buildx
+    podman-docker
+    containerd
+    runc
+)
+
+# Echo the installed subset of the conflict list, space-separated.
+_docker_conflicts_installed() {
+    local pkg found=()
+    for pkg in "${DOCKER_CONFLICTING_PKGS[@]}"; do
+        dpkg -s "$pkg" >/dev/null 2>&1 && found+=("$pkg")
+    done
+    printf '%s' "${found[*]:-}"
+}
+
 _run_docker() {
     local codename
     codename="$(_docker_repo_codename)" || return 1
 
-    install -m 0755 -d /etc/apt/keyrings
-    # --yes so a re-run overwrites the existing keyring. Without it, gpg
-    # refuses ("File exists") and, with no tty to prompt on, exits 2 — which
-    # under `set -e` aborts the whole module on `--redo 40-runtime`.
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-        | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
+    # Step 1 of docker.com's install guide, which this module used to skip
+    # entirely. Removal is gated on the operator's answer from configure_ —
+    # uninstalling packages without asking would violate the module contract.
+    if [[ "$(state_get DOCKER_REMOVE_CONFLICTS)" == yes ]]; then
+        local conflicts
+        conflicts="$(_docker_conflicts_installed)"
+        if [[ -n "$conflicts" ]]; then
+            # Recorded before removal: undo restores files, but it has no way
+            # to reinstate a package it didn't install, so the operator needs
+            # the list to put anything back by hand.
+            record_note "removed packages conflicting with Docker Engine: ${conflicts} (reinstall with: apt-get install ${conflicts})"
+            # Word-splitting is intended: conflicts is a space-separated list.
+            # shellcheck disable=SC2086
+            apt-get remove -y -qq $conflicts \
+                || warn "Some conflicting packages could not be removed; continuing."
+            log "Removed conflicting packages: ${conflicts}"
+        fi
+    fi
 
-    backup_file /etc/apt/keyrings/docker.gpg
-    backup_file /etc/apt/sources.list.d/docker.list
-    cat > /etc/apt/sources.list.d/docker.list <<EOF
-deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${codename} stable
+    install -m 0755 -d /etc/apt/keyrings
+
+    # Official docs now store the ARMORED key and point signed-by at it, rather
+    # than dearmoring into a .gpg. Both work, but `curl -o` overwrites on its
+    # own — which is precisely the "File exists" crash that had to be worked
+    # around with `gpg --batch --yes` when this used the .gpg form.
+    backup_file /etc/apt/keyrings/docker.asc
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    # deb822 .sources, matching the official docs and Ubuntu's own
+    # /etc/apt/sources.list.d/ubuntu.sources.
+    backup_file /etc/apt/sources.list.d/docker.sources
+    cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${codename}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
 EOF
+
+    # Drop the previous-format files. Leaving them would declare the same repo
+    # twice and make every apt run print "Target Packages is configured
+    # multiple times". Backed up first so undo can restore either shape.
+    local old
+    for old in /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.gpg; do
+        if [[ -e "$old" ]]; then
+            backup_file "$old"
+            rm -f "$old"
+            log "Removed superseded ${old}"
+        fi
+    done
 
     apt-get update -qq
     for _p in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; do
