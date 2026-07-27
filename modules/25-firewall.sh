@@ -207,7 +207,24 @@ verify_firewall() {
 }
 
 run_firewall() {
+    record_pkg_installed ufw
     apt-get install -y -qq ufw 2>/dev/null
+
+    # `ufw --force reset` below deletes every existing rule. On a host that
+    # already had a firewall — a rule for a database port, a VPN allow, a
+    # colleague's hand-added exception — that is unrecoverable without a copy.
+    # This is the single most destructive thing hardenup does, so the originals
+    # are preserved first. ufw itself writes a *.rules.YYYYMMDD backup on reset,
+    # but only for user*.rules and only in /etc/ufw, so it misses ufw.conf and
+    # the before/after rules an operator may have edited.
+    #
+    # Recorded BEFORE the reset, so first-touch capture sees the pre-hardenup
+    # state rather than our own output.
+    backup_dir_files /etc/ufw '*.rules'
+    backup_file /etc/ufw/ufw.conf
+    backup_file /etc/default/ufw
+    record_service_enabled ufw
+
     ufw --force reset >/dev/null 2>&1
     ufw default deny incoming
     ufw default allow outgoing

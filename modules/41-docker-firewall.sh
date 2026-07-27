@@ -107,6 +107,7 @@ run_docker_firewall() {
     # Docker bridge networking needs ip_forward and bridge-nf-call. Both are
     # set here so 26-sysctl can stay runtime-agnostic.
     modprobe br_netfilter 2>/dev/null || true
+    backup_file /etc/sysctl.d/99-docker.conf
     cat > /etc/sysctl.d/99-docker.conf <<'EOF'
 net.ipv4.ip_forward = 1
 net.bridge.bridge-nf-call-iptables  = 1
@@ -173,6 +174,8 @@ _persist_rules() {
     iptables-save > /etc/iptables/rules.v4
     chmod 0600 /etc/iptables/rules.v4
 
+    backup_file /etc/iptables/rules.v4
+    backup_file /etc/systemd/system/hardenup-iptables.service
     cat > /etc/systemd/system/hardenup-iptables.service <<'EOF'
 [Unit]
 Description=Restore hardenup iptables rules (DOCKER-USER)

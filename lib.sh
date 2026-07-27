@@ -577,3 +577,17 @@ print_summary() {
     echo -e "${BLUE}└$(printf '─%.0s' $(seq 1 $width))┘${NC}"
     echo ""
 }
+
+# =============================================================================
+# Reversibility helpers
+# =============================================================================
+#
+# Sourced here rather than in each module so every module gets backup_file and
+# the manifest recorders for free — retrofitting 21 header blocks would mean 21
+# chances to forget one, and a module that silently skips its backup is exactly
+# the failure this is meant to prevent.
+#
+# Loaded LAST because backup.sh calls warn(), which is defined above.
+_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=backup.sh
+source "${_LIB_DIR}/backup.sh"

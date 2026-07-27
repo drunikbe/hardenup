@@ -168,6 +168,7 @@ verify_unattended() {
 run_unattended() {
     # Already present on stock Ubuntu; this covers minimal//container images.
     if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
+        record_pkg_installed unattended-upgrades
         apt-get install -y -qq unattended-upgrades
     fi
 
@@ -192,6 +193,7 @@ Unattended-Upgrade::MailReport \"on-change\";"
 
     # Only scalars, and only the ones this module owns. Allowed-Origins is
     # deliberately absent — see the header.
+    backup_file "$UNATTENDED_DROPIN"
     cat > "$UNATTENDED_DROPIN" <<EOF
 // Managed by hardenup (29-unattended). Overrides the matching settings in
 // 50unattended-upgrades and 20auto-upgrades, which are left untouched:

@@ -194,6 +194,32 @@ Swarm managers form a Raft group with quorum `floor(N/2)+1`. **Two managers tole
 
 ---
 
+## Reversibility (backup.sh / undo.sh)
+
+`lib.sh` sources `backup.sh` at the end, so **every module already has** `backup_file`, `backup_dir_files`, `record_pkg_installed`, `record_service_enabled`, `record_user_created` and `record_note`. Don't add per-module source lines — retrofitting 21 headers is 21 chances to forget one, and a module that silently skips its backup is exactly the failure this prevents.
+
+### The rule
+
+**Call `backup_file <path>` immediately before any write to a path the module didn't create this run.** It is idempotent and cheap. The `record_*` helpers must be called BEFORE the thing they describe — each one skips targets that already exist, which is how undo knows never to remove a package, service or user the operator already had.
+
+### Gotcha: first touch is global, not per-run
+
+The original is stored only if no copy exists yet, keyed by absolute path across **all** runs. Per-run backups would mean a second run captures the first run's already-modified file and labels it "original" — after two runs the pristine version is gone. Since `run_` functions are idempotent and re-run freely via `--redo`, that would happen constantly. First copy wins, never overwritten. Verified: three runs of 42-docker-daemon with different values, and the stored original was still the pre-hardenup content.
+
+### Gotcha: the manifest is TSV, not JSON
+
+JSON from bash means jq, and jq is installed by 23-packages — which runs *after* 15/18/20/21/22. A backup library that can't record anything until a third of the wizard has run is useless. TSV needs only the shell. `_mf_append` refuses any value containing a tab rather than writing a row undo would misparse.
+
+### Gotcha: both stores live outside /run
+
+`/run` is tmpfs. A record of what changed must outlive the run that made it — and step 99 deletes the state dir on purpose. Hence `/var/backups/hardenup/` and `/var/lib/hardenup/`, both 0700/0600 (originals can contain secrets; the manifest reveals the host's whole hardening posture).
+
+### What undo deliberately won't do
+
+Packages are opt-in (`--packages`) — removing `docker-ce` takes every container with it. Users are never deleted (`userdel -r` destroys a home directory). Ubuntu Pro attachment and Swarm membership are `record_note` only, because both have effects off this machine: a seat consumed on the Canonical account, a node entry in the cluster's Raft state. Undo prints these for a human instead of guessing.
+
+---
+
 ## Conventions
 
 - **Idempotent by overwrite.** Every module that writes a config file uses `cat > file <<EOF` (truncating write), never `>>` (append). Re-running produces identical end state.

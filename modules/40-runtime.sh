@@ -207,14 +207,20 @@ _run_docker() {
         | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
 
+    backup_file /etc/apt/keyrings/docker.gpg
+    backup_file /etc/apt/sources.list.d/docker.list
     cat > /etc/apt/sources.list.d/docker.list <<EOF
 deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${codename} stable
 EOF
 
     apt-get update -qq
+    for _p in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; do
+        record_pkg_installed "$_p"
+    done
     apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
         docker-buildx-plugin docker-compose-plugin
 
+    record_service_enabled docker
     systemctl enable docker --now
 
     if [[ "$(state_get DOCKER_ADD_USER)" == yes ]]; then
