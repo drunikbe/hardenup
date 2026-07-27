@@ -159,3 +159,30 @@ tagged rules after three runs. Multi-node join and a 3-manager quorum could
 not be verified — there is only one Pi in this session. The UFW rules were
 validated with `ufw --dry-run` rather than by enabling UFW, because this
 session rides the SSH connection those rules would filter.
+
+### unattended-upgrades (#4): drop-in beats rewrite
+
+26.04 ships unattended-upgrades `ii`, active+enabled, with a populated
+`50unattended-upgrades` (Allowed-Origins incl. both ESM origins,
+Package-Blacklist, DevRelease). The module used to `cat >` over it.
+
+apt reads `/etc/apt/apt.conf.d/*` in lexical order and later assignments win
+for **scalars**, so hardenup now owns a single `52-hardenup-unattended`
+drop-in and never touches the distro's files. Confirmed on the box: after two
+runs, `50unattended-upgrades` and `20auto-upgrades` are byte-identical
+(md5 unchanged), all four distro Allowed-Origins remain effective, and
+`unattended-upgrades --dry-run` resolves them correctly.
+
+`Allowed-Origins` is deliberately excluded from the drop-in — it is a list
+(`Foo:: "x"` appends, it does not replace), the distro's value is already
+right, and a botched override silently stops security patching.
+
+Auto-reboot now defaults to **n**, per the issue's cluster-safety point: 29
+runs long before the swarm choice at 43 and cannot infer whether the host is a
+manager, and losing Raft quorum to a synchronized 04:00 reboot is worse than a
+kernel patch waiting for a window.
+
+Also fixed while here: the mail prompt was labelled "(blank to skip)" but
+`ask_input` loops on empty input, so the no-mail path was unreachable — an
+operator without a relay had to invent an address. It is now gated behind its
+own y/n.

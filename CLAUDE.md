@@ -153,6 +153,18 @@ Ubuntu 26.04 dropped **both** `iptables-persistent` and `netfilter-persistent` f
 
 41 now installs its own `hardenup-iptables.service` that restores `/etc/iptables/rules.v4` at boot, ordered `Before=docker.service` (Docker creates `DOCKER-USER` at startup; restoring into a chain it hasn't made yet fails). `iptables` on 26.04 is the nft backend and `iptables-save`/`restore` round-trip correctly through it.
 
+### `29-unattended`: drop-in, never rewrite the distro's apt config
+
+Ubuntu ships unattended-upgrades installed, enabled and configured — on 26.04 the package is `ii`, the timer is active, and `50unattended-upgrades` already carries `Allowed-Origins` (both ESM origins included), `Package-Blacklist` and `DevRelease`. This module used to `cat >` over that file, destroying all of it.
+
+It now writes only `/etc/apt/apt.conf.d/52-hardenup-unattended`. apt reads the directory in lexical order and later assignments win for **scalar** options, so a file sorting after `50` overrides exactly what we care about and leaves the rest alone. `20auto-upgrades` is likewise untouched.
+
+`Allowed-Origins` is deliberately NOT set there. It is a **list**, where `Foo:: "x"` appends rather than replaces, the distro default is already the correct security+ESM set, and a botched override silently stops security patching. Verified on 26.04 that our scalars take effect while all four distro `Allowed-Origins` entries survive — check with `apt-config dump`, which shows the merged effective config, not any single file.
+
+`run_` validates its own output with `apt-config dump` and deletes the drop-in if it doesn't parse: a broken file in `apt.conf.d` breaks *every* apt command on the host, which is a far bigger outage than missing patches.
+
+Auto-reboot defaults to **n**. 29 runs long before the swarm choice at 43, so it cannot infer whether this host is a cluster manager, and three managers rebooting together at 04:00 lose Raft quorum. An unplanned quorum loss beats a delayed kernel patch, so the safe answer is the default.
+
 ### `25-firewall` owns the Swarm cluster ports
 
 2377/tcp, 7946/tcp+udp and 4789/udp are declared in 25-firewall, not in 43-docker-swarm, for the same reason the VPN interface rule lives there: `run_firewall` begins with `ufw --force reset`, so a rule added by any later module is wiped the next time someone runs `--redo 25-firewall`. All UFW state is co-located.

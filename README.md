@@ -77,7 +77,7 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 | `26` | Kernel hardening baseline | Security sysctls. `ip_forward` is set by 41 if the container runtime needs it. |
 | `27` | Journald cap | 1G / 100M / 7d |
 | `28` | Timezone + NTP | Defaults to UTC; accepts any IANA zone (`Europe/Brussels`, `America/Los_Angeles`...). |
-| `29` | Unattended upgrades | Security-only patches; optional auto-reboot; optional `Mail` directive (needs step 19). |
+| `29` | Unattended upgrades | Security-only patches. Writes a **drop-in** (`52-hardenup-unattended`) and leaves Ubuntu's own `50unattended-upgrades` / `20auto-upgrades` untouched — later apt files win for scalars, so the distro's `Allowed-Origins` (incl. both ESM origins) and any `Package-Blacklist` survive. Auto-reboot defaults **off**: synchronized reboots across Swarm managers lose Raft quorum. |
 | `30` | Intrusion detection | None / fail2ban / CrowdSec. Both ignore `NET_PRIVATE_CIDR`. CrowdSec also auto-installs sensible collections. |
 | `34` | Ubuntu Pro | Optional (ESM + Livepatch). |
 | `40` | Container runtime | **Docker Engine (default)** / Podman / none. If Docker: sub-prompts for docker-group membership and UFW mitigation (`DOCKER-USER` chain or provider firewall). |
