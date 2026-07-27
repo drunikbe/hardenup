@@ -146,13 +146,64 @@ verify_runtime() {
     esac
 }
 
+# Resolve the apt suite to use against download.docker.com.
+#
+# Normally this is just the running release's codename. But docker.com
+# publishes a suite per Ubuntu release on its own schedule, so a brand-new
+# release can exist before its suite does — and writing a source file for a
+# suite that isn't published turns the next `apt-get update` into a 404.
+#
+# So: probe the Release file, and only fall back if the probe fails. As of
+# 2026-07 `resolute` (26.04) IS published with a current docker-ce for
+# amd64/arm64, so this falls back on nothing today — it's here so a future
+# Ubuntu release degrades to the newest LTS suite instead of breaking.
+#
+# Codename comes from /etc/os-release, which is always present; lsb_release
+# is a package (lsb-release) that a minimal image may not have, and this
+# module can run standalone before 23-packages installs it.
+_docker_repo_codename() {
+    local running fallback
+    running="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+    [[ -z "$running" ]] && running="$(lsb_release -cs 2>/dev/null || true)"
+
+    if [[ -z "$running" ]]; then
+        err "Cannot determine Ubuntu codename (/etc/os-release has no VERSION_CODENAME)."
+        return 1
+    fi
+
+    if curl -fsI --max-time 15 \
+        "https://download.docker.com/linux/ubuntu/dists/${running}/Release" >/dev/null 2>&1; then
+        echo "$running"
+        return 0
+    fi
+
+    # Newest-first. Only reached when docker.com hasn't published the
+    # running release yet.
+    for fallback in noble jammy; do
+        if curl -fsI --max-time 15 \
+            "https://download.docker.com/linux/ubuntu/dists/${fallback}/Release" >/dev/null 2>&1; then
+            warn "download.docker.com has no '${running}' suite yet; using '${fallback}' packages."
+            warn "Re-run 'sudo ./main.sh --redo 40-runtime' once ${running} is published."
+            echo "$fallback"
+            return 0
+        fi
+    done
+
+    err "download.docker.com is unreachable, or publishes no usable suite."
+    err "Checked: ${running}, noble, jammy."
+    return 1
+}
+
 _run_docker() {
     local codename
-    codename="$(lsb_release -cs)"
+    codename="$(_docker_repo_codename)" || return 1
 
     install -m 0755 -d /etc/apt/keyrings
+    # --yes so a re-run overwrites the existing keyring. Without it, gpg
+    # refuses ("File exists") and, with no tty to prompt on, exits 2 — which
+    # under `set -e` aborts the whole module on `--redo 40-runtime`.
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
 
     cat > /etc/apt/sources.list.d/docker.list <<EOF
