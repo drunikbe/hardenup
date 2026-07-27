@@ -14,8 +14,7 @@
 # Never overwrites an existing id_ed25519 — prints a notice and moves on.
 #
 # This module only generates OUTBOUND keys. Inbound peer authorization
-# (other machines SSH-ing into this host) is handled by 66-ssh-peers,
-# which is gated on RKE2 selection.
+# (other machines SSH-ing into this host) is handled by 66-ssh-peers.
 # =============================================================================
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +60,7 @@ detect_ssh_keygen() {
 
 configure_ssh_keygen() {
     info "Creates a new Ed25519 identity on this host for outbound SSH."
-    info "Useful for GitHub deploy keys, rsync backups, kubectl-over-ssh between nodes."
+    info "Useful for GitHub deploy keys, rsync backups, and deploys between nodes."
     if ! ask_yesno "Generate an Ed25519 keypair on this host (for GitHub, peers, etc.)?" "y"; then
         state_set SSH_KEYGEN_ENABLED no
         return 0

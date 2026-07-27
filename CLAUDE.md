@@ -11,14 +11,14 @@ This file focuses on non-obvious edges — contract, state lifecycle, load-beari
 `main.sh` is a linear yes/no wizard. It walks `modules/NN-*.sh` in filename-sort order, and for each module:
 
 1. Checks `STEP_<name>_COMPLETED` in state. If set (and `--redo <name>` wasn't passed), prints `✓ <name> [done at <ts>]` and continues.
-2. `applies_<name>` — re-evaluated inline. If false, the step is invisible this run. `applies_` gates on state set by EARLIER modules (e.g. `STEP_rke2_SELECTED=yes` makes the 61–65 modules apply).
+2. `applies_<name>` — re-evaluated inline. If false, the step is invisible this run. `applies_` gates on state set by EARLIER modules (e.g. `STEP_docker_SELECTED=yes` makes 41-docker-firewall apply).
 3. `detect_<name>` — reads canonical config files to populate prompt defaults.
 4. `configure_<name>` — asks the operator's top-level Y/N + sub-questions. If Y/N is no, the module calls `state_mark_skipped <name>` and `configure_` returns; main.sh sees the flag and moves on.
 5. `run_<name>` — executes immediately. Per-step safety pauses live here.
 6. `verify_<name>` (or `check_<name>` as fallback) — reads canonical state to confirm the action persisted. If it fails, main.sh prints a clear error and exits non-zero WITHOUT marking the step completed. The operator fixes and re-runs; the wizard resumes at the failed step.
 7. `state_mark_completed <name>` — records completion with an ISO timestamp.
 
-There is no "configure-all-then-run-all" batch. Each step asks, executes, verifies, and moves on. Per-step safety pauses (SSH secondary-terminal confirm, etcd quorum warning, Proxy Protocol ordering) replace the old batch-summary confirmation.
+There is no "configure-all-then-run-all" batch. Each step asks, executes, verifies, and moves on. Per-step safety pauses (SSH secondary-terminal confirm, UFW rule ordering) replace the old batch-summary confirmation.
 
 ### Module contract
 
@@ -47,9 +47,9 @@ If you rename a module, rename all five of its functions. Otherwise main.sh sile
 
 ### Gotcha: `applies_` ordering
 
-`applies_<name>` is evaluated inline every iteration, so it can consult state set by earlier modules (e.g. `STEP_rke2_SELECTED` set by 60-rke2-preflight's `configure_`). It CANNOT consult state set by the same module or any module with a HIGHER number — that state doesn't exist yet.
+`applies_<name>` is evaluated inline every iteration, so it can consult state set by earlier modules (e.g. `STEP_docker_SELECTED` set by 40-runtime's `configure_`). It CANNOT consult state set by the same module or any module with a HIGHER number — that state doesn't exist yet.
 
-This is how the profile gating was eliminated: `40-runtime.sh` unconditionally applies and is the single fork in the road — the operator picks Podman / Docker / RKE2 (or none). Downstream modules gate on the resulting flags: `41-docker-firewall.sh` applies when `STEP_docker_SELECTED=yes`, `60-rke2-preflight` and `61-65` + `70-79` apply when `STEP_rke2_SELECTED=yes`. 40 flips both flags on the chosen path and unsets the other so a `--redo 40-runtime` that switches platforms doesn't leak stale state to modules on the abandoned path.
+This is how the profile gating was eliminated: `40-runtime.sh` unconditionally applies and is the single fork in the road — the operator picks Docker / Podman (or none). Downstream modules gate on the resulting flag: `41-docker-firewall.sh` applies when `STEP_docker_SELECTED=yes`. 40 sets the flag on the Docker path and unsets it on the others, so a `--redo 40-runtime` that switches platforms doesn't leak stale state to modules on the abandoned path.
 
 ---
 
@@ -58,7 +58,7 @@ This is how the profile gating was eliminated: `40-runtime.sh` unconditionally a
 `/run/hardenup/state.env` (0600, tmpfs) holds everything for the duration of the run:
 
 - Operator answers (hostname, user name, SSH key, ports, CIDRs).
-- Generated secrets (RKE2 token, Grafana admin password, CrowdSec bouncer key, Rancher bootstrap password, SSH Ed25519 pubkey).
+- Generated secrets and keys (SSH Ed25519 pubkey; Swarm join tokens once 42 lands).
 - Step flags: `STEP_<name>_SELECTED`, `STEP_<name>_COMPLETED`, `STEP_<name>_COMPLETED_AT`, `STEP_<name>_SKIPPED`, `STEP_<name>_SKIPPED_AT`.
 
 ### Gotcha: the state file is NOT trap-cleaned
@@ -69,10 +69,6 @@ The previous iteration of this repo had `trap state_cleanup EXIT` in main.sh. Th
 
 State.env holds secrets while the wizard is running. The terminal `99-finalize.sh` prints them to stdout for the operator to copy, then wipes the file. There is no separate `/root/platform-credentials.txt` — this was intentionally removed. If the operator misses the stdout dump, the secrets are still retrievable from their canonical locations:
 
-- RKE2 token: `/etc/rancher/rke2/config.yaml` (`token: "..."`)
-- Grafana admin: `kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d`
-- Rancher bootstrap: set in the Helm release; resettable via `kubectl -n cattle-system patch secret bootstrap-secret`.
-- CrowdSec bouncer key: in the ingress-nginx ConfigMap / Lua init container env.
 - SSH host key: `~/.ssh/id_ed25519.pub`.
 
 Step 99's verify asserts that `/run/hardenup/` no longer exists. If deletion fails, the wizard exits non-zero with a loud message — secrets on tmpfs are still gone at reboot, but manual cleanup is safer.
@@ -114,30 +110,18 @@ Semantics: peer-initiated connections to the server work (inbound creates a conn
 
 Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UFW's rules, so bound container ports become reachable from the public internet even when UFW default-deny is set. 41 fixes this by installing explicit rules in the `DOCKER-USER` chain: allow from `NET_PRIVATE_CIDR`, then default-drop. If 41 is skipped, any `docker run -p 80:80` exposes the container publicly regardless of UFW state. Do not let anyone "simplify" this module away.
 
-### `63-rke2-service`: etcd quorum
-
-Joining a second server while the first isn't `Ready` yet can split-brain the etcd Raft group. 61-rke2-config displays the quorum warning at configure time; the operator MUST wait between server joins. Workers are fine in parallel (no etcd membership change).
-
-### `72-ingress-nginx`: Proxy Protocol ordering
-
-The chart deploys nginx with `use-proxy-protocol: "true"`. After it's up, 72 pauses with: *"Enable Proxy Protocol on LB ports 80/443 — DO NOT enable it on port 6443."* If you enable PP on the LB before nginx is ready, clients get 400s. If you enable it on 6443, kubectl stops working (it doesn't speak PP).
-
-### `65-rke2-post`: Calico WireGuard is post-install only
-
-For Calico + WireGuard, 64-rke2-wireguard does NOT write a pre-install HelmChartConfig (Calico has no such manifest for WG). Instead, 65 drops `/usr/local/bin/rke2-enable-wireguard` and tells the operator to run it **after all nodes have joined**. Enabling Calico WG before all nodes have the WG kernel module breaks pod connectivity on the stragglers.
 
 ---
 
 ## Ordering and gating constraints
 
-- **Execution order is filename-glob sort.** Don't rename existing modules; gaps in numbering (11–14, 16–17, 42–49, 54–58, 67–69, 80–98) are intentional reserve slots for insertions.
+- **Execution order is filename-glob sort.** Don't rename existing modules; gaps in numbering (11–14, 16–17, 42–49, 55–65, 67–98) are intentional reserve slots for insertions. 60–79 became free when the RKE2 platform stack moved to the `k8s` branch — reuse those numbers only for work that genuinely belongs that late in the run.
 - **`10` is free since the PROFILE module was deleted.** Available for a future always-first module if needed.
-- **`15-networks` runs before any network-aware module.** 25-firewall, 30-intrusion, 41-docker-firewall, 61-rke2-config, 72-ingress-nginx all consult `NET_PUBLIC_*` / `NET_PRIVATE_*`.
+- **`15-networks` runs before any network-aware module.** 25-firewall, 30-intrusion, 41-docker-firewall all consult `NET_PUBLIC_*` / `NET_PRIVATE_*`.
 - **`18-vpn` runs before 24-ssh-harden and 25-firewall on purpose.** Installing a VPN early lets those modules offer VPN-aware options conditional on `VPN_ENABLED=yes` / `VPN_KIND`: 24 may enable Tailscale SSH (ONLY when `VPN_KIND=tailscale` — WireGuard has no equivalent since it's a protocol, not an identity system), and 25 exposes the SSH scope selector (anywhere / no_public / vpn_only). Operators who decline a VPN at 18 see neither sub-prompt. 25-firewall writes the `allow in on ${VPN_IFACE}` rule itself so the `ufw --force reset` doesn't clobber it — VPN trust is co-located with the rest of the UFW state. State schema: `VPN_KIND` ∈ {none, tailscale, wireguard}, `VPN_IFACE` ∈ {"", tailscale0, wg0 or operator-chosen}; `VPN_ENABLED` is a convenience flag. The old `TAILSCALE_ENABLED` key is auto-migrated at detect time for re-runs against existing state.
 - **`30-intrusion` asks its y/n AND picks fail2ban vs crowdsec in a single step.** Replaces the former three-file split (30-security-choice + 31-fail2ban + 32-crowdsec-host) — one module = one wizard step.
-- **`40-runtime` is where the "Install Kubernetes?" decision lives** (alongside Podman / Docker / none as mutually-exclusive siblings). Picking RKE2 sets `STEP_rke2_SELECTED=yes`; modules 60-65 and 70-79 all gate on that flag. `60-rke2-preflight` is the confirm+preflight step, not the decision point — its `applies_` returns false when RKE2 wasn't chosen, so an operator who picked Podman/Docker at 40 never sees any RKE2-related prompt. The audit-rule setup that used to live in 59-audit is now inlined into `run_rke2_config` (61) — kept with RKE2 because that's where it's meaningful.
-- **`62-rke2-install` writes `/etc/sysctl.d/99-rke2.conf`.** This is where `ip_forward=1`, bridge-nf-call, inotify limits, and the `rp_filter=0` CNI carve-out happen. 26-sysctl is runtime-agnostic and writes only the baseline; 41-docker-firewall handles the Docker equivalent.
-- **70–79 gate on `STEP_rke2_service_COMPLETED=yes`.** This means the wizard won't offer to install Helm/ingress-nginx/etc. until RKE2 is up and kubectl works. To deploy the platform stack after the initial run, re-invoke `sudo ./main.sh` — completed steps show as `✓ [done]` and the wizard resumes at the platform modules.
+- **`40-runtime` is the single container-platform fork** (Docker / Podman / none, mutually exclusive). Picking Docker sets `STEP_docker_SELECTED=yes`, which gates 41-docker-firewall. Kubernetes (RKE2) used to be a third option pulling in a 60-79 platform stack; that path is preserved on the `k8s` branch — see `docs/roadmap.md`.
+- **26-sysctl is runtime-agnostic** and writes only the hardening baseline; it deliberately does not set `ip_forward`. 41-docker-firewall writes the Docker-specific forwarding/bridge sysctls.
 
 ---
 
@@ -157,7 +141,7 @@ For Calico + WireGuard, 64-rke2-wireguard does NOT write a pre-install HelmChart
   3. On decline: `state_mark_skipped <name>` then `return 0`.
   4. On accept: the module's sub-questions and state writes follow.
 
-  Reject the temptation to make any step "silent because the default is obviously correct". The principle is *visibility over brevity*: operators should never discover, mid-wizard, that a step has already committed a change they didn't see. Modules that represent "the operator already consented upstream" (e.g. `41-docker-firewall` after picking Docker at 40, `51/52/53-webserver-*` after picking at 50, `61-65` after RKE2 yes at 60) still get the same info + y/n, just with default=`y` — the prompt exists for visibility, not to add friction.
+  Reject the temptation to make any step "silent because the default is obviously correct". The principle is *visibility over brevity*: operators should never discover, mid-wizard, that a step has already committed a change they didn't see. Modules that represent "the operator already consented upstream" (e.g. `41-docker-firewall` after picking Docker at 40, `51/52/53-webserver-*` after picking at 50) still get the same info + y/n, just with default=`y` — the prompt exists for visibility, not to add friction.
 
   Example (`25-firewall.sh:34-39`):
   ```bash

@@ -4,14 +4,15 @@
 # =============================================================================
 #
 # Multi-node setups often need inter-host SSH for administrative tasks:
-# running kubectl from one node to another, rsync, backup pulls, cluster
-# bootstrap scripts. This step appends public keys from peer machines to
+# rsync, backup pulls, cluster bootstrap scripts, running a deploy from one
+# node against another. This step appends public keys from peer machines to
 # this host's authorized_keys so those peers can SSH in without a later
 # ssh-copy-id round trip.
 #
-# Gated on RKE2 selection. Single-node hosts typically don't need inbound
-# SSH from other automated peers; non-k8s multi-VPS setups (separate
-# DB server etc.) can still add keys manually via ssh-copy-id later.
+# Always offered, default `n`: a single-node host doesn't need inbound SSH
+# from automated peers, but a Docker Swarm (or any multi-VPS setup with a
+# separate DB/backup host) usually does. Declining here is not a dead end —
+# keys can still be added later with ssh-copy-id.
 #
 # Owner: same resolution as 22-ssh-keygen — primary non-root user
 # (USER_NAME) if set, else root.
@@ -23,9 +24,7 @@ source "${MODULE_DIR}/../lib.sh"
 # shellcheck source=/dev/null
 source "${MODULE_DIR}/../state.sh"
 
-applies_ssh_peers() {
-    [[ "$(state_get STEP_rke2_SELECTED no)" == "yes" ]]
-}
+applies_ssh_peers() { return 0; }
 
 _peers_owner() {
     local u
@@ -53,7 +52,8 @@ configure_ssh_peers() {
     owner="$(state_get SSH_PEERS_OWNER)"
     home="$(_peers_home_for "$owner")"
 
-    info "Multi-node setups often need inbound SSH for kubectl, rsync, backups."
+    info "Multi-node setups (Docker Swarm, separate DB/backup host) often need"
+    info "inbound SSH from peer machines for rsync, backups and deploy scripts."
     info "Pasted keys are appended to ${home}/.ssh/authorized_keys."
 
     if ! ask_yesno "Allow other servers to SSH into this host now?" "n"; then

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# main.sh — Linear yes/no wizard for VPS / Docker / Kubernetes setup
+# main.sh — Linear yes/no wizard for hardened Ubuntu + Docker Swarm setup
 # =============================================================================
 #
 # Walks modules/NN-*.sh in filename-sort order. For each module:
 #   1. applies_<name> gate — re-evaluated every iteration, so it can consult
-#      state that EARLIER modules set (e.g. STEP_rke2_SELECTED gates 61-65).
+#      state that EARLIER modules set (e.g. STEP_docker_SELECTED gates 41).
 #   2. If STEP_<name>_COMPLETED=yes and --redo didn't list it → print
 #      "✓ [done at <ts>]" and continue.
 #   3. detect_<name> — populate state from canonical config files.
@@ -21,13 +21,13 @@
 # State lives at /run/hardenup/state.env for the full run. It
 # survives Ctrl+C / lost connections / failed steps, so re-running resumes
 # at the first incomplete step. The terminal 99-finalize.sh step prints
-# generated secrets to stdout and wipes the state file.
+# a run summary to stdout and wipes the state file.
 #
 # Usage:
 #   sudo ./main.sh                       # walk the full wizard
 #   sudo ./main.sh --only 25-firewall    # run exactly one step
 #   sudo ./main.sh --redo 24-ssh-harden  # clear completion flag and rerun
-#   sudo ./main.sh --redo "7*"           # re-run all modules matching a glob
+#   sudo ./main.sh --redo "2*"           # re-run all modules matching a glob
 #   sudo ./main.sh --reset               # wipe state.env; re-ask every question
 #   sudo ./main.sh --force-reset         # --reset without confirmation (for --non-interactive)
 #   sudo ./main.sh --answers FILE        # pre-seed state from KEY=VALUE file
@@ -123,7 +123,7 @@ ensure_tmux ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
 banner "Cloud VPS Setup — main.sh" "Ubuntu ${UBUNTU_VERSION}"
 
 # --reset wipes state.env BEFORE state_init, so old answers are never loaded
-# into the shell. Config files on disk (sshd, UFW, helm releases, installed
+# into the shell. Config files on disk (sshd, UFW, installed
 # packages) are NOT touched — only the wizard's orchestration state is cleared.
 if [[ $RESET -eq 1 ]]; then
     # Refuse STATE_DIR overrides — rm -rf on an operator-supplied path is a
@@ -136,22 +136,10 @@ if [[ $RESET -eq 1 ]]; then
     fi
 
     if [[ -e "$STATE_FILE" ]]; then
-        # Cluster-aware guard: state.env holds the live RKE2 join token.
-        # If RKE2 is already running, the next run generates a NEW token and
-        # rewrites config.yaml — other nodes' stored tokens won't match.
-        if [[ -f /etc/rancher/rke2/config.yaml ]] \
-           && { systemctl is-active --quiet rke2-server 2>/dev/null \
-                || systemctl is-active --quiet rke2-agent 2>/dev/null; }; then
-            warn "RKE2 is running on this node. --reset will regenerate the"
-            warn "cluster join token — other nodes will NOT be able to rejoin."
-            warn "Use --redo <specific-step> for targeted re-runs instead."
-        fi
-        warn "--reset wipes state.env only. Config files, installed packages,"
-        warn "and helm releases on disk stay — they are DETECTED and USED as"
-        warn "defaults on the next run, which can desync from state other"
-        warn "systems hold:"
-        warn "  - RKE2 peers store the current join token server-side."
-        warn "  - Grafana admin password lives in the helm-managed Secret."
+        warn "--reset wipes state.env only. Config files and installed packages"
+        warn "on disk stay — they are DETECTED and USED as defaults on the next"
+        warn "run, which can desync from state other systems hold:"
+        warn "  - Swarm peers store the current join tokens cluster-side."
         warn "  - CrowdSec bouncer is registered with the CrowdSec console."
         warn "Existing users, SSH keys, UFW rules, and sshd drop-ins persist."
         warn "For a clean slate, reprovision the VM instead."
@@ -185,8 +173,8 @@ fi
 
 # Apply --redo by clearing completion flags on matched modules. Accepts
 # comma-separated module stems (e.g. "25-firewall") or glob patterns
-# (e.g. "7*" to re-run the whole 70-79 platform stack, "*-rke2-*" for
-# all RKE2-related modules). A pattern matching zero modules is an error
+# (e.g. "2*" to re-run every 20-29 hardening step, "*-ssh-*" for
+# all SSH-related modules). A pattern matching zero modules is an error
 # so typos fail loud instead of silently doing nothing.
 if [[ -n "$REDO" ]]; then
     IFS=',' read -ra REDO_LIST <<< "$REDO"
@@ -283,7 +271,7 @@ for f in "${ALL_MODULES[@]}"; do
     sfx="$(mod_func_suffix "$name")"
 
     # applies_<name> gates against state set by earlier steps (e.g.
-    # STEP_rke2_SELECTED). Re-evaluated each iteration so the gate sees the
+    # STEP_docker_SELECTED). Re-evaluated each iteration so the gate sees the
     # most recent state.
     if declare -F "applies_${sfx}" >/dev/null && ! "applies_${sfx}"; then
         continue

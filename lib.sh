@@ -445,7 +445,7 @@ require_cmd() {
 }
 
 # Re-launch the current script inside a tmux session for SSH disconnect
-# protection. Long-running operations (apt upgrade, RKE2 start, Helm installs)
+# protection. Long-running operations (apt upgrade, image pulls, docker install)
 # survive connection drops when wrapped in tmux. The operator can reattach with
 # `tmux attach -t <session>` after reconnecting.
 #

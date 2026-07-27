@@ -5,9 +5,7 @@
 #
 # Installs the short list of tools every host wants (curl, jq, git, htop,
 # etc.). Runtime-specific packages live with their runtimes:
-#   - K8s extras (ipset, conntrack, socat, open-iscsi, nfs-common, auditd)
-#     are installed by 62-rke2-install.sh before the RKE2 binary.
-#   - Docker packages are installed by 40-docker.sh from the docker.com repo.
+#   - Docker packages are installed by 40-runtime.sh from the docker.com repo.
 # =============================================================================
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
