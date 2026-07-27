@@ -18,7 +18,7 @@ detect_hostname() {
 
 configure_hostname() {
     info "Sets the system hostname via hostnamectl."
-    info "Used later as the RKE2 node name and in TLS SANs if applicable."
+    info "Used later as the Docker Swarm node name."
     if ! ask_yesno "Configure the system hostname?" "y"; then
         state_mark_skipped hostname
         return 0

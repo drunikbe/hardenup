@@ -9,9 +9,6 @@
 # to the container runtime modules:
 #   - 41-docker-firewall.sh sets ip_forward=1 + bridge-nf-call when Docker
 #     is selected.
-#   - 62-rke2-install.sh writes /etc/sysctl.d/99-rke2.conf with the full
-#     CNI-required set (ip_forward=1, forwarding=1, inotify limits, etc.)
-#     and drops rp_filter (CNI plugins need asymmetric routing).
 #
 # Also writes defensive host-level settings: disable core dumps, restrict
 # cron directory permissions.
@@ -46,7 +43,6 @@ verify_sysctl() {
 run_sysctl() {
     cat > /etc/sysctl.d/99-hardening.conf <<'SYSEOF'
 # IP Spoofing protection
-# NOTE: rp_filter is removed by 62-rke2-install.sh when RKE2 is selected.
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 

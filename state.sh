@@ -21,7 +21,7 @@
 # Canonical source of truth
 # -------------------------
 # The real config files the modules write (sshd_config.d, ufw rules,
-# /etc/crowdsec/*, /etc/rancher/rke2/*, kubectl secrets, ~/.ssh/) are the
+# /etc/crowdsec/*, /etc/docker/*, ~/.ssh/) are the
 # long-term truth. state.env is the orchestration scratchpad — it vanishes
 # when the run finishes. Sub-scripts invoked standalone do not rely on this
 # file; they call detect_<name> to reconstruct from the real files.

@@ -14,7 +14,7 @@
 #   NET_HAS_PRIVATE      — "yes" or "no"
 #
 # When NET_HAS_PRIVATE=no, all downstream modules that have multi-network
-# decisions (firewall, intrusion, docker-firewall, RKE2, ingress) collapse
+# decisions (firewall, intrusion, docker-firewall, swarm) collapse
 # their private-net branches away and behave as single-network hosts.
 # =============================================================================
 
@@ -115,7 +115,7 @@ _show_interfaces() {
 
 configure_networks() {
     info "Detects the public (WAN) and optional private (intra-server) NICs."
-    info "Consumed by firewall, intrusion, RKE2, ingress, and other modules."
+    info "Consumed by firewall, intrusion, docker-firewall and swarm modules."
     _show_interfaces
 
     # Confirm / override public interface + IP. Soft-warn on values the kernel

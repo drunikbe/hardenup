@@ -6,8 +6,8 @@
 # Operator chooses whether to enable at all, whether to auto-reboot when a
 # security update requires it, and at what wall-clock time. Auto-reboot
 # default is "y" (uncoordinated reboots are fine for single-node VPS / Docker
-# hosts); K8s operators should answer "n" when the wizard asks, because
-# uncoordinated reboots on a cluster node bypass kured's coordination.
+# hosts); Swarm manager operators should answer "n" when the wizard asks,
+# because uncoordinated reboots on a cluster node can break Raft quorum.
 # The reboot time defaults to 04:00 (UTC, quiet for EU); operators serving
 # other timezones should pick a low-traffic window for their audience.
 # =============================================================================
@@ -48,11 +48,13 @@ configure_unattended() {
         "$(state_get UNATTENDED_MAIL "$(state_get MTA_NOTIFY_EMAIL)")"
     state_set UNATTENDED_MAIL "$REPLY"
 
-    # 29 runs before 60-rke2-preflight, so we can't default off based on an
-    # RKE2 selection that hasn't been made yet. Operators on K8s nodes must
-    # answer "n" — documented in the prompt so it's hard to miss.
-    info "Note: K8s (RKE2) nodes should answer 'n' below — use kured for"
-    info "coordinated cluster reboots instead of unattended kernel restarts."
+    # 29 runs before the runtime/cluster choice at 40-42, so we can't default
+    # this off based on a Swarm selection that hasn't been made yet. Operators
+    # on cluster nodes must answer "n" — documented in the prompt so it's hard
+    # to miss.
+    info "Note: Docker Swarm managers should answer 'n' below — three managers"
+    info "rebooting together at 04:00 loses Raft quorum. Reboot them by hand,"
+    info "one at a time, waiting for each to rejoin."
     if ask_yesno "Auto-reboot when a kernel update requires it?" "y"; then
         state_set UNATTENDED_AUTO_REBOOT yes
         # Wall-clock time is in 24h system-local TZ (UTC on most cloud images).
@@ -94,7 +96,7 @@ EOF
         reboot_block="Unattended-Upgrade::Automatic-Reboot \"true\";
 Unattended-Upgrade::Automatic-Reboot-Time \"${reboot_time}\";"
     else
-        reboot_block='// Auto-reboot disabled (use kured or manual reboots on K8s nodes)
+        reboot_block='// Auto-reboot disabled (reboot cluster nodes manually, one at a time)
 Unattended-Upgrade::Automatic-Reboot "false";'
     fi
 
