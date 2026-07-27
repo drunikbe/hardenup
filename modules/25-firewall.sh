@@ -4,12 +4,14 @@
 # =============================================================================
 #
 # Public network (NET_PUBLIC_IFACE, always present):
-#   HTTP/HTTPS only when the operator opts in (or when a web server / reverse
-#   proxy was selected earlier in the run). SSH presence depends on SSH_SCOPE.
+#   HTTP/HTTPS only when the operator opts in. SSH presence depends on
+#   SSH_SCOPE. Note that a Cloudflare Tunnel needs NO public inbound ports
+#   at all — cloudflared dials out — so a tunnel-fronted host can leave
+#   80/443 closed.
 #
 # Private network (NET_PRIVATE_IFACE, if NET_HAS_PRIVATE=yes):
-#   Allow-all on the private interface. Intra-server traffic (etcd, kubelet,
-#   exporters, DB replication) changes as components come and go — a port
+#   Allow-all on the private interface. Intra-server traffic (Swarm control
+#   plane, overlay VXLAN, DB replication) changes as components come and go — a port
 #   allow-list on a trusted private net is fragile and adds no real security
 #   over deny-from-public. SSH_SCOPE=vpn_only adds a targeted deny for the
 #   SSH port on this interface, keeping the allow-all for everything else.
@@ -52,11 +54,14 @@ configure_firewall() {
         return 0
     fi
 
-    # Default the HTTP-open question to "y". 25 runs before 40-docker and
-    # 50-webserver-choice, so it can't know what the operator will pick at
-    # those steps — hence we don't try to infer. Most hosts want 80/443 open
-    # anyway. If the operator answers "n" and later installs Docker or a
-    # host reverse proxy, they can re-run:  sudo ./main.sh --redo 25-firewall
+    # 25 runs before the runtime choice at 40, so it can't know whether the
+    # operator will publish container ports on the host — hence we ask rather
+    # than infer. Answering "n" is correct for a Cloudflare Tunnel host:
+    # cloudflared makes an OUTBOUND connection to Cloudflare's edge, so no
+    # inbound port needs to be open. Either answer is reversible later with:
+    #   sudo ./main.sh --redo 25-firewall
+    info "A Cloudflare Tunnel needs no inbound ports — cloudflared dials out."
+    info "Answer 'n' if this host is tunnel-fronted; 'y' if you publish 80/443."
     if ask_yesno "Open HTTP/HTTPS (80/443) on the public interface?" "y"; then
         state_set FIREWALL_OPEN_HTTP yes
     else

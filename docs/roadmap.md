@@ -72,8 +72,8 @@ preferred — it tracks releases faster and ships the compose/buildx plugins.
 
 ### Anything that pins a codename is still worth auditing
 
-The 404 risk is real in general, just not today: the (now removed) nginx and
-OpenResty modules keyed their apt repos off `lsb_release -cs` against
+The 404 risk is real in general, just not today: the nginx and OpenResty
+modules removed in #7 keyed their apt repos off `lsb_release -cs` against
 `nginx.org` and `openresty.org`, which publish far fewer suites than Docker
 does. Any future module adding a third-party apt repo should verify the
 suite exists for the running codename before writing the source file.

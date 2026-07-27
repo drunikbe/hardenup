@@ -1,6 +1,6 @@
 # hardenup
 
-Provision a hardened Ubuntu VPS for running Docker containers behind a Let's Encrypt-fronted reverse proxy — SSH hardening, firewall, intrusion detection, sensible kernel and logging defaults, all interactive.
+Provision a hardened Ubuntu VPS for running Docker containers — SSH hardening, firewall, intrusion detection, sensible kernel and logging defaults, all interactive. Ingress is a [Cloudflare Tunnel](#ingress-cloudflare-tunnel), so no inbound ports and no host-managed certificates.
 
 One entry point — `sudo ./main.sh` — walks through each capability in order. Every step prints a two-line description and asks for permission before doing anything. Ctrl+C or lose the connection? Re-run the script; it resumes at the first incomplete step.
 
@@ -12,8 +12,6 @@ One entry point — `sudo ./main.sh` — walks through each capability in order.
 - Intrusion detection: fail2ban or CrowdSec — with sensible collections preinstalled for crowdsec (`linux`, `sshd`, `http-cve`, ...).
 - Kernel hardening baseline (ASLR, SYN cookies, no source routing) + journald disk cap + UTC/NTP + unattended security upgrades (optional email notifications through a small MTA).
 - **Docker Engine** (default, from `docker.com`) or **Podman** (rootless, daemonless). If Docker: either the `DOCKER-USER` iptables hardening or "I handle port exposure via my cloud provider's firewall".
-- **OpenResty** (default, nginx + Lua), **nginx** (upstream `nginx.org`), or **Apache** (upstream `ppa:ondrej/apache2`) as a host reverse proxy — with optional **CrowdSec Lua bouncer** on OpenResty.
-- **Let's Encrypt** via certbot or acme.sh, HTTP-01 or DNS-01 challenge, wildcards supported with Cloudflare / Route53 / DigitalOcean DNS plugins.
 
 > **Kubernetes?** RKE2 and the 60–79 platform stack used to live here. They are preserved on the [`k8s` branch](https://github.com/drunikbe/hardenup/tree/k8s) and are not part of this tree — see [`docs/roadmap.md`](docs/roadmap.md).
 
@@ -32,7 +30,7 @@ cd /opt/hardenup
 sudo ./main.sh
 ```
 
-Accept the defaults (press Enter) for a standard Docker-with-reverse-proxy host.
+Accept the defaults (press Enter) for a standard hardened Docker host.
 
 ## Usage
 
@@ -65,7 +63,7 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 
 | # | Step | Notes |
 |---|------|-------|
-| `15` | Network detection | Public + (optional) private interface, IP, CIDR. Consumed by firewall, intrusion, webserver, Docker firewall. |
+| `15` | Network detection | Public + (optional) private interface, IP, CIDR. Consumed by firewall, intrusion, Docker firewall. |
 | `19` | MTA (msmtp) | Optional: set up a small mail relay so `unattended-upgrades` and cron email actually deliver. |
 | `20` | Hostname | `hostnamectl set-hostname` |
 | `21` | Non-root sudo user (+ SSH key) | Lockout guard: refuses to continue if you'd lose SSH access. |
@@ -73,7 +71,7 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 | `18` | VPN (optional) | **Tailscale** (zero-config, account required) or **WireGuard** (paste peer config from UniFi / WG-Easy / self-hosted). WireGuard path offers a one-way sub-prompt (conntrack egress block in PostUp/PreDown) so the server can respond to inbound but can't initiate outbound over the tunnel. Installed early so 24 and 25 can offer VPN-aware options. |
 | `23` | Base packages | apt update + curl, jq, git, htop, vim, tmux, unzip, net-tools. |
 | `24` | SSH hardening | Drop-in config + secondary-terminal confirm before the daemon reloads. Sub-prompt when `VPN_KIND=tailscale`: enable Tailscale SSH (identity+ACL auth, `n` default — sshd-everywhere is the simpler model). No equivalent for WireGuard. |
-| `25` | Host firewall (UFW) | Multi-network-aware with SSH scope selector: **Anywhere** (default), **No public** (block public SSH; private+VPN allowed), **VPN only** (block public AND private SSH; VPN only — ⚠ console-recovery dependency if the VPN breaks). HTTP/HTTPS independent of scope. |
+| `25` | Host firewall (UFW) | HTTP/HTTPS prompt (answer `n` on a tunnel-fronted host — cloudflared needs no inbound port). Multi-network-aware with SSH scope selector: **Anywhere** (default), **No public** (block public SSH; private+VPN allowed), **VPN only** (block public AND private SSH; VPN only — ⚠ console-recovery dependency if the VPN breaks). HTTP/HTTPS independent of scope. |
 | `26` | Kernel hardening baseline | Security sysctls. `ip_forward` is set by 41 if the container runtime needs it. |
 | `27` | Journald cap | 1G / 100M / 7d |
 | `28` | Timezone + NTP | Defaults to UTC; accepts any IANA zone (`Europe/Brussels`, `America/Los_Angeles`...). |
@@ -82,11 +80,33 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 | `34` | Ubuntu Pro | Optional (ESM + Livepatch). |
 | `40` | Container runtime | **Docker Engine (default)** / Podman / none. If Docker: sub-prompts for docker-group membership and UFW mitigation (`DOCKER-USER` chain or provider firewall). |
 | `41` | Docker firewall | DOCKER-USER chain + `ip_forward=1`. Runs only when Docker is chosen AND the `DOCKER-USER` mitigation is picked at step 40. Podman doesn't have the UFW-bypass problem. |
-| `50` | Host reverse proxy selector | **Shape** first: `single-site` (wizard wires default vhost + LE cert), `multi-site` (wizard installs engine only; operator adds per-site vhosts/certs), `other` (internal / proxy-only / advanced). Then **engine**: **OpenResty (default)** / nginx / Apache. All three install from upstream repos. Domain + LE email are only prompted in `single-site` shape. |
-| `51–53` | Install chosen proxy | Writes an HTTP-only default vhost with an ACME webroot location. OpenResty additionally gets the CrowdSec Lua bouncer if step 30 picked CrowdSec. TLS is step 54. |
-| `54` | TLS certificates | Optional Let's Encrypt. Client: certbot / acme.sh. Challenge: HTTP-01 (default) or DNS-01 (wildcards / private hosts). DNS providers: Cloudflare / Route53 / DigitalOcean / manual. Writes the TLS server block for whichever proxy was installed. |
 | `66` | SSH peers | Optional (default `n`): pre-authorize inbound SSH keys from peer machines (Swarm nodes, backup host) so they can reach this host without a later `ssh-copy-id`. |
 | `99` | Finalize | Prints a run summary, wipes state.env, verifies the wipe. |
+
+## Ingress: Cloudflare Tunnel
+
+hardenup does **not** install a host reverse proxy or manage certificates. Ingress is a Cloudflare Tunnel: `cloudflared` runs as a container, dials **out** to Cloudflare's edge, and traffic reaches your services over that outbound connection. TLS terminates at the edge.
+
+What that buys you:
+
+- **No inbound ports.** Answer `n` to step 25's HTTP/HTTPS question — nothing needs to listen on the public interface. The host's attack surface is SSH (or not even that, with `vpn_only` scope).
+- **No certificate management.** No certbot, no acme.sh, no renewal cron, no DNS-01 plugin credentials sitting on the box.
+- **No host web server.** Services are reached by their service name on a Docker overlay network, not through a local nginx vhost.
+
+Sketch of the swarm-service pattern (create the tunnel and copy its token from the Cloudflare Zero Trust dashboard first):
+
+```bash
+docker service create --name cloudflared \
+  --mode replicated --replicas 2 \
+  --network my-overlay \
+  --secret cf_tunnel_token \
+  cloudflare/cloudflared:latest \
+  tunnel --no-autoupdate run
+```
+
+Point each public hostname at `http://<service-name>:<port>` in the tunnel's ingress rules. Two replicas give you a highly-available tunnel across swarm nodes.
+
+> If you need a CF-independent fallback (host nginx/OpenResty/Apache + Let's Encrypt), that code is preserved on the [`k8s` branch](https://github.com/drunikbe/hardenup/tree/k8s) — it was removed from this tree in #7, not deleted.
 
 ## Files
 
