@@ -11,6 +11,7 @@ One entry point — `sudo ./main.sh` — walks through each capability in order.
 - UFW: deny all incoming, SSH on the public interface, HTTP/HTTPS when you want it, allow-all on the private network if one is detected.
 - Intrusion detection: fail2ban or CrowdSec — with sensible collections preinstalled for crowdsec (`linux`, `sshd`, `http-cve`, ...).
 - Kernel hardening baseline (ASLR, SYN cookies, no source routing) + journald disk cap + UTC/NTP + unattended security upgrades (optional email notifications through a small MTA).
+- Docker daemon log rotation, so container logs can't silently fill the disk.
 - **Docker Engine** (default, from `docker.com`) or **Podman** (rootless, daemonless). If Docker: either the `DOCKER-USER` iptables hardening or "I handle port exposure via my cloud provider's firewall".
 
 > **Kubernetes?** RKE2 and the 60–79 platform stack used to live here. They are preserved on the [`k8s` branch](https://github.com/drunikbe/hardenup/tree/k8s) and are not part of this tree — see [`docs/roadmap.md`](docs/roadmap.md).
@@ -80,6 +81,7 @@ State lives at `/run/hardenup/state.env` (tmpfs, 0600, root-only) for the durati
 | `34` | Ubuntu Pro | Optional (ESM + Livepatch). |
 | `40` | Container runtime | **Docker Engine (default)** / Podman / none. If Docker: sub-prompts for docker-group membership and UFW mitigation (`DOCKER-USER` chain or provider firewall). |
 | `41` | Docker firewall | DOCKER-USER chain + `ip_forward=1`. Runs only when Docker is chosen AND the `DOCKER-USER` mitigation is picked at step 40. Podman doesn't have the UFW-bypass problem. |
+| `42` | Docker daemon config | Log rotation in `/etc/docker/daemon.json` (`json-file`, default 50m × 5). Docker ships **no** rotation, so container logs otherwise grow until the disk fills. Merges into an existing `daemon.json` rather than overwriting it. Requires a daemon restart — pauses for confirmation if containers are running. |
 | `66` | SSH peers | Optional (default `n`): pre-authorize inbound SSH keys from peer machines (Swarm nodes, backup host) so they can reach this host without a later `ssh-copy-id`. |
 | `99` | Finalize | Prints a run summary, wipes state.env, verifies the wipe. |
 

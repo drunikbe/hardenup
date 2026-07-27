@@ -14,13 +14,14 @@
 #
 #   Podman        — daemonless, rootless-by-default. Fine for a single host
 #                   running plain containers, but it has no Swarm equivalent,
-#                   so the swarm step (42) won't apply. Drop-in `docker` CLI
-#                   via the podman-docker shim. No iptables bypass.
+#                   so the Docker-only steps (41 firewall, 42 daemon config,
+#                   43 swarm) won't apply. Drop-in `docker` CLI via the
+#                   podman-docker shim. No iptables bypass.
 #
 # Sets CONTAINER_RUNTIME to `docker` / `podman` / `none`.
 # Downstream gate flags are wired from the choice so mutually-exclusive
 # modules stay invisible on the wrong path:
-#   - STEP_docker_SELECTED=yes  → 41-docker-firewall applies
+#   - STEP_docker_SELECTED=yes  → 41-docker-firewall, 42-docker-daemon apply
 # When the choice changes on --redo, the inverse flag is unset so stale
 # state from a prior run doesn't leak into the new path.
 #
@@ -47,9 +48,9 @@ detect_runtime() {
 
 configure_runtime() {
     info "Pick ONE container platform for this host. Docker Engine is what this"
-    info "repo targets — it's the only one with Swarm, so the cluster step (42)"
+    info "repo targets — it's the only one with Swarm, so the cluster step (43)"
     info "and Cloudflare Tunnel ingress assume it. Podman is daemonless and"
-    info "rootless-by-default, but single-host only: no Swarm, no step 42."
+    info "rootless-by-default, but single-host only: no Swarm, no step 43."
     if ! ask_yesno "Install a container platform (docker/podman)?" "y"; then
         state_set CONTAINER_RUNTIME none
         state_unset STEP_docker_SELECTED 2>/dev/null || true

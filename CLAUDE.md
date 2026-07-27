@@ -106,6 +106,33 @@ PostUp  = iptables -A OUTPUT -o <iface> -j DROP
 
 Semantics: peer-initiated connections to the server work (inbound creates a conntrack entry; responses match ESTABLISHED); server-initiated connections to the peer are dropped. Matches the "home router NAT" model — the UniFi case the feature was designed for. Side effects: DNS-over-tunnel stops working in this mode (if the pasted config sets `DNS = 192.168.1.1`, the VPS can't reach it). If an operator later installs a monitoring agent or similar that needs outbound tunnel access, they must re-run `--redo 18-vpn` and answer `n` to the one-way prompt, OR whitelist the specific destination via a narrower PostUp rule.
 
+### `42-docker-daemon`: daemon.json is MERGED, and log opts need a full restart
+
+Two things here are easy to get wrong.
+
+**Merge, don't truncate.** This is the one module that deliberately breaks the
+"idempotent by overwrite" convention. `/etc/docker/daemon.json` is a shared
+file — operators and other tooling put registry mirrors, insecure-registries,
+proxies and address pools in it. A truncating `cat >` would silently delete
+them, and the breakage (image pulls failing against an internal registry)
+shows up far from the cause. Only `log-driver` and the two `log-opts` keys
+this module owns are replaced; the rest is preserved. Invalid JSON is a hard
+refusal, not a rewrite.
+
+**`log-driver`/`log-opts` are not reloadable.** `systemctl reload docker`
+(SIGHUP) does NOT apply them — verified on Ubuntu 26.04 / Docker 29.6.2: a
+container created after a reload still had an empty `LogConfig.Config`. Only
+a full restart works, and a restart stops running containers, because
+`live-restore` is deliberately unset (it is incompatible with Swarm mode —
+dockerd refuses to start with both). Hence the confirm pause in `run_` when
+containers are running. Rotation applies to containers created AFTER the
+restart; existing ones keep the config they were created with.
+
+Also: `systemctl reset-failed` runs before the restart. systemd rate-limits
+unit starts, so a few `--redo` runs in quick succession leave docker in
+`failed (start-limit-hit)` and refuse every later restart until the counter
+clears.
+
 ### `40-runtime` / `41-docker-firewall`: Docker bypasses UFW
 
 Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UFW's rules, so bound container ports become reachable from the public internet even when UFW default-deny is set. 41 fixes this by installing explicit rules in the `DOCKER-USER` chain: allow from `NET_PRIVATE_CIDR`, then default-drop. If 41 is skipped, any `docker run -p 80:80` exposes the container publicly regardless of UFW state. Do not let anyone "simplify" this module away.
@@ -123,6 +150,7 @@ Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UF
 - **`30-intrusion` asks its y/n AND picks fail2ban vs crowdsec in a single step.** Replaces the former three-file split (30-security-choice + 31-fail2ban + 32-crowdsec-host) — one module = one wizard step.
 - **`40-runtime` is the single container-platform fork** (Docker / Podman / none, mutually exclusive). Picking Docker sets `STEP_docker_SELECTED=yes`, which gates 41-docker-firewall. Kubernetes (RKE2) used to be a third option pulling in a 60-79 platform stack; that path is preserved on the `k8s` branch — see `docs/roadmap.md`.
 - **26-sysctl is runtime-agnostic** and writes only the hardening baseline; it deliberately does not set `ip_forward`. 41-docker-firewall writes the Docker-specific forwarding/bridge sysctls.
+- **41, 42 (and 43 when it lands) all gate on `STEP_docker_SELECTED=yes`.** They are the Docker-only tail of the runtime fork; an operator who picked Podman or none never sees them.
 
 ---
 

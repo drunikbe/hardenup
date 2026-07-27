@@ -48,7 +48,7 @@ configure_unattended() {
         "$(state_get UNATTENDED_MAIL "$(state_get MTA_NOTIFY_EMAIL)")"
     state_set UNATTENDED_MAIL "$REPLY"
 
-    # 29 runs before the runtime/cluster choice at 40-42, so we can't default
+    # 29 runs before the runtime/cluster choice at 40-43, so we can't default
     # this off based on a Swarm selection that hasn't been made yet. Operators
     # on cluster nodes must answer "n" — documented in the prompt so it's hard
     # to miss.
