@@ -103,7 +103,7 @@ _configure_docker() {
     local fw_default=1
     [[ "$(state_get DOCKER_FIREWALL_MODE)" == "provider" ]] && fw_default=2
     ask_choice "How to control exposed Docker container ports" "$fw_default" \
-        "DOCKER-USER chain|Step 41 installs allow-from-private + default-drop rules in the iptables DOCKER-USER chain" \
+        "DOCKER-USER chain|Step 41 drops unsolicited inbound on the public NIC; container egress, overlay and swarm-node traffic are unaffected" \
         "Provider firewall|Skip step 41; you block traffic at the cloud provider (Hetzner Cloud Firewall, AWS SG, GCP/DO Firewall, etc.). Make sure 22/80/443 are open upstream."
     case "$REPLY" in
         1) state_set DOCKER_FIREWALL_MODE docker-user ;;

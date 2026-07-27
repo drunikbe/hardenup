@@ -111,3 +111,51 @@ modules removed in #7 keyed their apt repos off `lsb_release -cs` against
 `nginx.org` and `openresty.org`, which publish far fewer suites than Docker
 does. Any future module adding a third-party apt repo should verify the
 suite exists for the running codename before writing the source file.
+
+### Swarm work (#5) turned up three pre-existing bugs
+
+**1. `DOCKER-USER` default-drop broke container egress.** `DOCKER-USER` is in
+`FORWARD`, which carries both directions of container traffic, so the
+unqualified `-j DROP` matched new *outbound* connections too. On a single-NIC
+host — where 15-networks reports no private network, so there was no allow
+rule at all — every container lost outbound networking including DNS.
+Verified: `docker run alpine wget https://download.docker.com/` failed with
+`bad address`, the DROP counter advanced, and removing the rule fixed it.
+
+This is fatal for this stack specifically, because ingress is a Cloudflare
+Tunnel and `cloudflared` works by dialling **out**. The drop is now scoped
+with `-i <public iface>`; with no known public interface the module installs
+no drop at all rather than an unscoped one.
+
+**2. Rule flush never removed most of its own rules.** `iptables -D` needs the
+complete rule spec, so the drain loops — which passed only the comment — never
+matched the `-m conntrack` RETURN or the `-s <cidr>` RETURNs. Every re-run
+appended another copy. Now flushed by line number matched on the comment.
+
+**3. 26.04 has no `iptables-persistent` *or* `netfilter-persistent`.** Both are
+gone from the archive (checked with main/restricted/universe/multiverse
+enabled; no candidate for either, nothing else provides the service). The old
+code called them unconditionally, then fell back to writing
+`/etc/iptables/rules.v4` into a directory that didn't exist — so the
+DOCKER-USER rules silently vanished on the next reboot. 41 now installs a
+small `hardenup-iptables.service` ordered before `docker.service`.
+
+### Single-NIC LAN hosts aren't "private" to 15-networks
+
+15-networks defines the private interface as *RFC1918 on a non-default-route
+NIC*. A Pi cluster (or any homelab box) has one NIC carrying the default
+route, so `NET_HAS_PRIVATE=no` even though its only address is 10.0.0.0/24.
+Declaring that NIC as "private" would be wrong — 25-firewall's private rule is
+`allow in on <iface>`, i.e. allow-all, which on a single-NIC host disables the
+firewall entirely. Hence the swarm prompt asks for the node subnet separately
+and defaults it to the public interface's own network.
+
+### Verified on the box, single node
+
+`docker swarm init`, an attachable overlay network, and a replicated service
+with a published port all work with the DOCKER-USER rules active: egress OK,
+published port HTTP 200, overlay service-name resolution OK, and exactly three
+tagged rules after three runs. Multi-node join and a 3-manager quorum could
+not be verified — there is only one Pi in this session. The UFW rules were
+validated with `ufw --dry-run` rather than by enabling UFW, because this
+session rides the SSH connection those rules would filter.
