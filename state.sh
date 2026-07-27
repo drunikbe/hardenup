@@ -44,11 +44,27 @@ STATE_DIR="${STATE_DIR:-/run/hardenup}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.env}"
 
 # Initialize the state directory and (empty) state file. Safe to re-run.
+# Create the state store AND load whatever is already in it.
+#
+# Loading used to be a separate state_load call that only main.sh made. Every
+# module's standalone block called state_init alone, so a standalone run saw
+# empty state for everything: state_get reads shell variables, not the file.
+# The visible symptom was a module exiting 0 in silence, because its applies_
+# gate read an unset STEP_*_SELECTED and decided it didn't apply — which looks
+# exactly like success.
+#
+# Since every caller wants both, init does both. state_load stays public and
+# idempotent (main.sh still calls it explicitly, and re-sourcing merely
+# re-assigns the same values).
+#
+# Safe with --reset: main.sh deletes STATE_DIR *before* calling state_init, so
+# there is nothing stale left to load.
 state_init() {
     mkdir -p "$STATE_DIR"
     chmod 0700 "$STATE_DIR"
     [[ -f "$STATE_FILE" ]] || : > "$STATE_FILE"
     chmod 0600 "$STATE_FILE"
+    state_load
 }
 
 # Load answers from a user-provided file (pre-seed state). Values override
