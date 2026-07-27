@@ -26,6 +26,8 @@
 #   ask_choice PROMPT DEFAULT OPT...        Numbered menu  -> sets REPLY (1-based index)
 #   ask_yesno PROMPT [DEFAULT]              Yes/no         -> returns 0=yes, 1=no
 #   ask_input PROMPT [DEFAULT] [REGEX]      Free text      -> sets REPLY
+#   ask_input_optional PROMPT [DEF] [RE]    Free text, blank allowed -> sets REPLY
+#   (all four honour NON_INTERACTIVE=1 by taking the default)
 #   ask_password PROMPT [MIN_LEN]           Hidden input   -> sets REPLY
 #   ask_multiselect PROMPT OPT...           Toggle list    -> sets MULTISELECT_RESULT array ("on"/"off")
 #
@@ -135,6 +137,12 @@ ask_choice() {
         printf "  ${BOLD}%d)${NC} %-16s— %s%s\n" "$num" "${labels[$i]}" "${descs[$i]}" "$marker"
     done
 
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        info "${prompt} -> ${default} (non-interactive default)"
+        REPLY="$default"
+        return 0
+    fi
+
     # Loop until a valid numeric choice is entered. An EOF on stdin (piped
     # /dev/null, closed tty) exits loudly instead of busy-looping on "Invalid".
     local input
@@ -168,6 +176,16 @@ ask_yesno() {
         marker_no=" [default]"
     fi
 
+    # Headless mode: take the default instead of reading. Without this the
+    # read below hits EOF and exits 1 with "stdin closed", which is why
+    # --non-interactive could never get past the first module's prompt.
+    # The choice is logged so a headless run's transcript still shows what
+    # was decided on the operator's behalf.
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        info "${prompt} -> $([[ $default_num -eq 1 ]] && echo Yes || echo No) (non-interactive default)"
+        [[ $default_num -eq 1 ]] && return 0 || return 1
+    fi
+
     echo ""
     echo -e "${BOLD}${prompt}${NC}"
     printf "  ${BOLD}1)${NC} Yes%s\n" "$marker_yes"
@@ -197,10 +215,32 @@ ask_input() {
         display_default=" [${default}]"
     fi
 
+    # Headless mode: the default IS the answer. With no default there is
+    # nothing to fall back on, so fail loudly rather than hang on a read that
+    # can never succeed — the fix is to seed the value via --answers.
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        if [[ -z "$default" && "${_ASK_ALLOW_EMPTY:-0}" -ne 1 ]]; then
+            err "Non-interactive run needs a value for: ${prompt}"
+            err "Seed it in the --answers file and re-run."
+            exit 1
+        fi
+        info "${prompt} -> ${default:-<empty>} (non-interactive default)"
+        REPLY="$default"
+        return 0
+    fi
+
     local input
     while true; do
         read -rp "${prompt}${display_default}: " input || { err "stdin closed"; exit 1; }
         input="${input:-$default}"
+
+        # _ASK_ALLOW_EMPTY lets ask_input_optional accept a blank answer.
+        # Without it an empty value always loops, which made every prompt
+        # labelled "(blank to skip)" impossible to satisfy.
+        if [[ -z "$input" && "${_ASK_ALLOW_EMPTY:-0}" -eq 1 ]]; then
+            REPLY=""
+            return 0
+        fi
 
         if [[ -z "$input" ]]; then
             err "A value is required."
@@ -216,6 +256,17 @@ ask_input() {
         REPLY="$input"
         return 0
     done
+}
+
+# ask_input_optional "prompt" [default] [regex]
+#
+# Same as ask_input but an empty answer is accepted and returns REPLY="".
+# For genuinely optional values — a notification address, an enrolment key —
+# where "I don't have one" must be expressible. Previously those prompts said
+# "(blank to skip)" and then rejected blank, leaving no way forward but to
+# invent a value.
+ask_input_optional() {
+    _ASK_ALLOW_EMPTY=1 ask_input "$@"
 }
 
 # ask_password "prompt" [min_length]

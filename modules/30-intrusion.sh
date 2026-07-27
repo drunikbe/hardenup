@@ -57,7 +57,7 @@ configure_intrusion() {
             info "agent sends decisions + sensor metrics to CrowdSec Inc. Decline for"
             info "pure local operation — detection and blocking still work offline."
             if ask_yesno "Enroll CrowdSec in the web console dashboard?" "n"; then
-                ask_input "CrowdSec enrollment key (from app.crowdsec.net console; blank to skip)" ""
+                ask_input_optional "CrowdSec enrollment key (from app.crowdsec.net console; blank to skip)" ""
                 state_set CROWDSEC_ENROLL_KEY "$REPLY"
             fi
         fi
