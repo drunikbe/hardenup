@@ -137,6 +137,18 @@ clears.
 
 Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UFW's rules, so bound container ports become reachable from the public internet even when UFW default-deny is set. 41 fixes this by installing explicit rules in the `DOCKER-USER` chain: allow RELATED/ESTABLISHED and the trusted node subnets, then drop. If 41 is skipped, any `docker run -p 80:80` exposes the container publicly regardless of UFW state. Do not let anyone "simplify" this module away.
 
+### `40-runtime`: don't remove docker.com's own packages as "conflicts"
+
+`DOCKER_CONFLICTING_PKGS` is docker.com's official uninstall-first list. The trap is the near-namesakes: Ubuntu's `containerd` and `docker-buildx` **do** conflict, while docker.com's `containerd.io`, `docker-buildx-plugin` and `docker-compose-plugin` are the packages we just asked for. Adding the latter to that array would uninstall the runtime mid-install. Verified on 26.04 that the detector reports nothing on a healthy docker-ce host.
+
+Removal is gated on `DOCKER_REMOVE_CONFLICTS`, answered in `configure_`, and only prompted when something actually conflicts — uninstalling software silently would break the module contract, and prompting on a clean host would be pure friction. The removed list is `record_note`'d because undo can restore files but cannot reinstate a package it never installed.
+
+### `40-runtime`: key/repo format migration is one-way and must clean up
+
+The module writes `/etc/apt/keyrings/docker.asc` + `/etc/apt/sources.list.d/docker.sources` (deb822), matching current official docs. Hosts provisioned by older hardenup have `docker.gpg` + `docker.list`. Both are removed after the new pair is written — leaving them declares the same repo twice and every apt run then prints "Target Packages is configured multiple times". They're `backup_file`'d first, so undo can restore either shape.
+
+Incidentally the `.asc` form is why the `gpg --batch --yes` workaround is gone: `curl -o` overwrites on its own, so there is no "File exists" crash to defend against.
+
 ### `41-docker-firewall`: the DROP must stay scoped to the public interface
 
 `DOCKER-USER` sits in `FORWARD`, which carries **both** directions of container traffic. An unqualified `-j DROP` therefore kills container **egress** too — a new outbound connection matches neither RETURN rule. This module used to do exactly that, and on a single-NIC host (where 15-networks finds no private network, so there was no allow rule at all) it broke every container's outbound networking, DNS included.
