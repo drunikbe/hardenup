@@ -70,6 +70,40 @@ The repo carries `amd64 arm64 armhf s390x ppc64el` and a current docker-ce
 is also available in `universe` as a fallback, but the upstream repo is
 preferred — it tracks releases faster and ships the compose/buildx plugins.
 
+A real install on the box confirmed it end to end: docker-ce 29.6.2,
+compose v5.3.1, buildx 0.35.0, `docker info` healthy (overlayfs, systemd
+cgroup v2), `docker swarm init` elects a leader, and an attachable overlay
+network creates and deletes cleanly.
+
+### The actual bug in that code path was `gpg --dearmor`
+
+Issue #3 pointed at the right function for the wrong reason. `_run_docker`
+piped the Docker GPG key into `gpg --dearmor -o /etc/apt/keyrings/docker.gpg`
+with no `--yes`. gpg refuses to overwrite an existing file, and with no tty
+to prompt on it exits 2 — which under `set -euo pipefail` aborted the whole
+module. So `--redo 40-runtime` on any host that had already installed Docker
+would fail, violating the repo's "idempotent by overwrite" convention.
+
+Verified on the box, with the keyring already present:
+
+```
+$ curl -fsSL .../gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+exit 0
+$ curl -fsSL .../gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+gpg: cannot open '/dev/tty': No such device or address
+exit 2
+```
+
+### Codename resolution is now defensive anyway
+
+`_docker_repo_codename` reads `VERSION_CODENAME` from `/etc/os-release`
+(always present — `lsb_release` comes from a package a minimal image may
+lack, and 40-runtime can run standalone before 23-packages installs it),
+probes the docker.com `Release` file for that suite, and only falls back to
+the newest published LTS if the probe fails. Today it falls back on nothing;
+it exists so a future Ubuntu release degrades gracefully instead of writing
+a source file that 404s.
+
 ### Anything that pins a codename is still worth auditing
 
 The 404 risk is real in general, just not today: the nginx and OpenResty
