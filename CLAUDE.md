@@ -177,6 +177,14 @@ It now writes only `/etc/apt/apt.conf.d/52-hardenup-unattended`. apt reads the d
 
 Auto-reboot defaults to **n**. 29 runs long before the swarm choice at 43, so it cannot infer whether this host is a cluster manager, and three managers rebooting together at 04:00 lose Raft quorum. An unplanned quorum loss beats a delayed kernel patch, so the safe answer is the default.
 
+### `30-intrusion`: no `curl | bash`, and the bouncer flavour is a choice
+
+CrowdSec's repo used to be set up by piping `install.crowdsec.net` into root bash — 418 lines, unverified, unpinned, and the only place in this repo that ran an unchecked remote script. It is now done inline: import the key, write a deb822 `.sources`, `apt-get update`.
+
+Worth knowing: CrowdSec's repo path is `.../crowdsec/any/ any main` — **distro-agnostic**, unlike docker.com's per-codename suites. There is no 404-on-a-new-release risk here, and no codename probe is needed. Verified installing cleanly on 26.04 (`resolute`), a suite packagecloud has never heard of.
+
+The bouncer is `crowdsec-firewall-bouncer-iptables`, not the nftables variant, on purpose. 26.04's iptables *is* the nft backend, so the iptables bouncer writes nftables rules underneath anyway — and 41-docker-firewall manages DOCKER-USER through iptables too. Mixing an nft-native bouncer with iptables-nft rule management means two tools writing the same tables in different dialects, which surfaces as rules invisible from whichever command you happen to run. The nftables package resolves fine if that tradeoff is ever revisited.
+
 ### `25-firewall` owns the Swarm cluster ports
 
 2377/tcp, 7946/tcp+udp and 4789/udp are declared in 25-firewall, not in 43-docker-swarm, for the same reason the VPN interface rule lives there: `run_firewall` begins with `ufw --force reset`, so a rule added by any later module is wiped the next time someone runs `--redo 25-firewall`. All UFW state is co-located.

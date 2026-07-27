@@ -108,9 +108,74 @@ EOF
     log "Fail2ban active (SSH: 3 retries, 1h ban; ignoring: ${ignore})"
 }
 
+# Set up CrowdSec's apt repository, doing inline what
+# `curl -s https://install.crowdsec.net | bash` used to do for us.
+#
+# That pipe fetched a 418-line script and ran it as root with no checksum, no
+# signature and no pinned version — whatever the URL served at that moment
+# executed with full privileges. It was also the only place in this repo that
+# did so; everything else verifies what it downloads.
+#
+# Reading the script shows it does nothing exotic on Debian/Ubuntu: import a
+# GPG key, write one source file, apt-get update. That is reproduced below,
+# matching CrowdSec's own manual instructions.
+#
+# Note the repo path is `.../crowdsec/any/ any main` — distro-agnostic, NOT
+# keyed by codename. So unlike docker.com's per-suite layout there is no
+# risk of a 404 on a new Ubuntu release; verified installing cleanly on
+# 26.04 (resolute), which packagecloud has never heard of.
+_setup_crowdsec_repo() {
+    local keyring=/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg
+    local source_file=/etc/apt/sources.list.d/crowdsec_crowdsec.sources
+
+    install -m 0755 -d /etc/apt/keyrings
+
+    backup_file "$keyring"
+    # --batch --yes: gpg refuses to overwrite an existing file and, with no
+    # tty to prompt on, exits 2 — which under `set -e` would abort the module
+    # on any re-run. Same trap that bit the Docker keyring.
+    if ! curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey \
+        | gpg --batch --yes --dearmor -o "$keyring"; then
+        err "Could not fetch the CrowdSec signing key."
+        return 1
+    fi
+    chmod a+r "$keyring"
+
+    # deb822, matching the format Ubuntu itself now ships.
+    backup_file "$source_file"
+    cat > "$source_file" <<EOF
+Types: deb
+URIs: https://packagecloud.io/crowdsec/crowdsec/any
+Suites: any
+Components: main
+Signed-By: ${keyring}
+EOF
+
+    # Drop the one-line file the upstream installer would have written, so the
+    # same repo isn't declared twice.
+    if [[ -e /etc/apt/sources.list.d/crowdsec_crowdsec.list ]]; then
+        backup_file /etc/apt/sources.list.d/crowdsec_crowdsec.list
+        rm -f /etc/apt/sources.list.d/crowdsec_crowdsec.list
+    fi
+
+    apt-get update -qq
+}
+
 _run_crowdsec() {
-    # Official installer script sets up the repository and apt key.
-    curl -s https://install.crowdsec.net | bash
+    _setup_crowdsec_repo || return 1
+
+    # Bouncer flavour: iptables, not nftables, deliberately.
+    #
+    # 26.04's iptables IS the nft backend (iptables v1.8.11 (nf_tables)), so
+    # the iptables bouncer writes nftables rules underneath anyway. Keeping it
+    # matters for consistency: 41-docker-firewall manages the DOCKER-USER chain
+    # through iptables too, and mixing an nft-native bouncer with iptables-nft
+    # rule management gives two tools writing the same tables in different
+    # dialects — which shows up as rules that are invisible from whichever
+    # command you happen to run.
+    #
+    # crowdsec-firewall-bouncer-nftables resolves cleanly on 26.04 if that
+    # tradeoff is ever revisited.
     record_pkg_installed crowdsec
     record_pkg_installed crowdsec-firewall-bouncer-iptables
     record_service_enabled crowdsec
