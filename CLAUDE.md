@@ -115,7 +115,8 @@ Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UF
 
 ## Ordering and gating constraints
 
-- **Execution order is filename-glob sort.** Don't rename existing modules; gaps in numbering (11–14, 16–17, 42–49, 55–65, 67–98) are intentional reserve slots for insertions. 60–79 became free when the RKE2 platform stack moved to the `k8s` branch — reuse those numbers only for work that genuinely belongs that late in the run.
+- **Execution order is filename-glob sort.** Don't rename existing modules; gaps in numbering (11–14, 16–17, 42–65, 67–98) are intentional reserve slots for insertions. 50–79 became free when the web-server/TLS modules and the RKE2 platform stack moved off this tree — reuse those numbers only for work that genuinely belongs that late in the run.
+- **There is no host reverse proxy and no host-managed TLS.** Ingress is a Cloudflare Tunnel (`cloudflared` as a container, outbound-only, TLS terminated at the CF edge). Modules 50–54 (webserver-choice / nginx / apache / openresty / tls-certs) were removed for this reason — see `docs/roadmap.md`. Don't reintroduce an ACME client or a vhost-writing module without revisiting that decision; a tunnel-fronted host has no inbound port for HTTP-01 to answer on.
 - **`10` is free since the PROFILE module was deleted.** Available for a future always-first module if needed.
 - **`15-networks` runs before any network-aware module.** 25-firewall, 30-intrusion, 41-docker-firewall all consult `NET_PUBLIC_*` / `NET_PRIVATE_*`.
 - **`18-vpn` runs before 24-ssh-harden and 25-firewall on purpose.** Installing a VPN early lets those modules offer VPN-aware options conditional on `VPN_ENABLED=yes` / `VPN_KIND`: 24 may enable Tailscale SSH (ONLY when `VPN_KIND=tailscale` — WireGuard has no equivalent since it's a protocol, not an identity system), and 25 exposes the SSH scope selector (anywhere / no_public / vpn_only). Operators who decline a VPN at 18 see neither sub-prompt. 25-firewall writes the `allow in on ${VPN_IFACE}` rule itself so the `ufw --force reset` doesn't clobber it — VPN trust is co-located with the rest of the UFW state. State schema: `VPN_KIND` ∈ {none, tailscale, wireguard}, `VPN_IFACE` ∈ {"", tailscale0, wg0 or operator-chosen}; `VPN_ENABLED` is a convenience flag. The old `TAILSCALE_ENABLED` key is auto-migrated at detect time for re-runs against existing state.
@@ -141,7 +142,7 @@ Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UF
   3. On decline: `state_mark_skipped <name>` then `return 0`.
   4. On accept: the module's sub-questions and state writes follow.
 
-  Reject the temptation to make any step "silent because the default is obviously correct". The principle is *visibility over brevity*: operators should never discover, mid-wizard, that a step has already committed a change they didn't see. Modules that represent "the operator already consented upstream" (e.g. `41-docker-firewall` after picking Docker at 40, `51/52/53-webserver-*` after picking at 50) still get the same info + y/n, just with default=`y` — the prompt exists for visibility, not to add friction.
+  Reject the temptation to make any step "silent because the default is obviously correct". The principle is *visibility over brevity*: operators should never discover, mid-wizard, that a step has already committed a change they didn't see. Modules that represent "the operator already consented upstream" (e.g. `41-docker-firewall` after picking Docker at 40) still get the same info + y/n, just with default=`y` — the prompt exists for visibility, not to add friction.
 
   Example (`25-firewall.sh:34-39`):
   ```bash

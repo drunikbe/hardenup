@@ -128,7 +128,7 @@ EOF
     # Install a curated default set of collections. The installer script's
     # auto-detection does most of this already based on running services,
     # but being explicit prevents missing coverage when a service gets
-    # added later (e.g. the operator installs nginx at step 51 after
+    # added later (e.g. the operator deploys a web-facing container after
     # crowdsec is already running). cscli is idempotent.
     cscli collections install \
         crowdsecurity/linux \
