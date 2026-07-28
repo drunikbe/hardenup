@@ -89,7 +89,7 @@ configure_user() {
             warn "  PermitRootLogin=no later will LOCK YOU OUT."
             warn "═══════════════════════════════════════════════════════════════"
             echo ""
-            if ! ask_yesno "Continue WITHOUT a non-root SSH user? (DANGEROUS)" "n"; then
+            if ! ask_confirm_critical "Continue WITHOUT a non-root SSH user? (DANGEROUS)" "n"; then
                 err "Aborted. Re-run and create a user."
                 exit 0
             fi
@@ -97,6 +97,11 @@ configure_user() {
     fi
 }
 
+# Deliberately no critical_prompts_user hook. The lockout guard is only
+# reachable after an interactive "no" to "Create a non-root sudo user?", and
+# that prompt's default is "y" — so under --recipe / --non-interactive a user
+# is always created and this pause never fires. Announcing it in the dry-run
+# plan would advertise a stop that cannot happen.
 check_user() {
     local u
     u="$(state_get USER_NAME)"

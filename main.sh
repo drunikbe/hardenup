@@ -31,9 +31,28 @@
 #   sudo ./main.sh --reset               # wipe state.env; re-ask every question
 #   sudo ./main.sh --force-reset         # --reset without confirmation (for --non-interactive)
 #   sudo ./main.sh --answers FILE        # pre-seed state from KEY=VALUE file
+#   sudo ./main.sh --recipe swarm-worker # apply a shipped preset (see recipes/)
+#   sudo ./main.sh --recipe --list       # list available recipes
 #   sudo ./main.sh --non-interactive     # no prompts; require seeded answers
+#   sudo ./main.sh --unattended          # also auto-answer safety confirmations
 #   sudo ./main.sh --dry-run             # list remaining steps; no changes
 # =============================================================================
+#
+# Prompt modes, in increasing order of "don't ask me"
+# ---------------------------------------------------
+#   (none)              every prompt asked.
+#   --recipe NAME       the recipe's answers are used without confirming each
+#                       one; prompts it left undefined (per-host secrets) are
+#                       still asked, and so are the load-bearing safety
+#                       confirmations.
+#   --non-interactive   every ordinary prompt takes its default; a prompt with
+#                       no default is a hard error naming the key to seed.
+#                       Safety confirmations still stop the run.
+#   --unattended        + safety confirmations take their default. Must be
+#                       combined with --non-interactive, and is refused when
+#                       SSH hardening is in the plan — auto-answering "yes I
+#                       verified SSH in another terminal" is how a config typo
+#                       becomes a permanent lockout.
 
 set -euo pipefail
 
@@ -42,6 +61,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 # shellcheck source=state.sh
 source "${SCRIPT_DIR}/state.sh"
+
+# shellcheck source=recipes.sh
+source "${SCRIPT_DIR}/recipes.sh"
 
 MODULE_DIR="${SCRIPT_DIR}/modules"
 
@@ -53,13 +75,23 @@ ORIG_ARGS=("$@")
 ONLY=""
 REDO=""
 ANSWERS_FILE=""
+RECIPE=""
+RECIPE_FILE=""
+MISSING_KEYS=""
+LIST_RECIPES=0
 NON_INTERACTIVE=0
+RECIPE_MODE=0
+UNATTENDED=0
 DRY_RUN=0
 RESET=0
 FORCE_RESET=0
 
+# Print the header comment block verbatim, minus the ==== dividers. Derived
+# from the file rather than a hard-coded line range so the two can't drift
+# apart when the header grows.
 usage() {
-    sed -n '3,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    awk 'NR<3 {next} !/^#/ {exit} {sub(/^# ?/, ""); if ($0 !~ /^=+$/) print}' \
+        "${BASH_SOURCE[0]}"
 }
 
 # Guard each value-taking flag so `./main.sh --redo` (no arg) prints a usage
@@ -73,6 +105,16 @@ while [[ $# -gt 0 ]]; do
         --only)            _require_value "$@"; ONLY="$2"; shift 2 ;;
         --redo)            _require_value "$@"; REDO="$2"; shift 2 ;;
         --answers)         _require_value "$@"; ANSWERS_FILE="$2"; shift 2 ;;
+        # `--recipe --list` is the documented spelling for enumerating them;
+        # accept the bare word too rather than making "list" an unusable name.
+        --recipe)          _require_value "$@"
+                           case "$2" in
+                               --list|list) LIST_RECIPES=1 ;;
+                               *)           RECIPE="$2" ;;
+                           esac
+                           shift 2 ;;
+        --list-recipes)    LIST_RECIPES=1; shift ;;
+        --unattended)      UNATTENDED=1; shift ;;
         --non-interactive) NON_INTERACTIVE=1; shift ;;
         --dry-run)         DRY_RUN=1; shift ;;
         --reset)           RESET=1; shift ;;
@@ -97,6 +139,34 @@ if [[ -n "$REDO" && -n "$ONLY" ]]; then
     exit 2
 fi
 
+# Listing recipes reads nothing but recipes/ — no root, no state, no tmux.
+if [[ $LIST_RECIPES -eq 1 ]]; then
+    recipe_list
+    exit 0
+fi
+
+# A recipe supplies answers, so ordinary prompts stop asking. lib.sh reads
+# RECIPE_MODE; see its "Prompt modes" block for how it differs from
+# --non-interactive (undefined values are still asked for, not fatal).
+#
+# Resolved here rather than at load time so a typo'd name fails on the name,
+# before the root check and the tmux re-exec — "no recipe named swarm-mangler"
+# is more use than "this script must be run as root".
+if [[ -n "$RECIPE" ]]; then
+    RECIPE_MODE=1
+    recipe_path "$RECIPE" >/dev/null || exit 2
+fi
+
+# --unattended only means anything when nothing else is going to prompt, and
+# pairing it with an interactive run would be a silent downgrade of the
+# safety confirmations for no benefit. Make the operator say both.
+if [[ $UNATTENDED -eq 1 && $NON_INTERACTIVE -ne 1 ]]; then
+    err "--unattended requires --non-interactive."
+    err "It only silences the load-bearing safety confirmations; every other"
+    err "prompt is governed by --non-interactive / --recipe."
+    exit 2
+fi
+
 # Given a module file path, echo its short name: "/x/25-firewall.sh" → "25-firewall".
 mod_name() {
     local f="$1"
@@ -118,7 +188,14 @@ require_ubuntu
 
 # tmux session protection. Re-execs inside tmux (if available) and forwards
 # the operator's original argv so --redo / --answers / etc. are preserved.
-ensure_tmux ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
+#
+# Skipped for --dry-run: it changes nothing, so there is no half-applied state
+# for a dropped connection to leave behind — and re-execing a planning command
+# into a new session makes its output land somewhere the operator isn't
+# looking (or fails outright when there's no terminal to attach).
+if [[ $DRY_RUN -eq 0 ]]; then
+    ensure_tmux ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
+fi
 
 banner "Cloud VPS Setup — main.sh" "Ubuntu ${UBUNTU_VERSION}"
 
@@ -165,10 +242,59 @@ fi
 state_init
 state_load
 
+# --dry-run must not persist anything, and pre-seeding is a write: state_set
+# writes through to state.env, so previewing a recipe used to leave all of its
+# answers behind for the next real run to silently inherit. Load the real
+# state first (so the plan reflects genuinely completed steps), then redirect
+# further writes to a throwaway copy inside the same tmpfs directory.
+#
+# This is the one trap-on-EXIT in the tree, and it removes only the scratch
+# copy. The real state.env is still deleted solely by 99-finalize — that is
+# what makes an interrupted run resumable.
+if [[ $DRY_RUN -eq 1 ]]; then
+    DRY_STATE="$(mktemp "${STATE_DIR}/dryrun.XXXXXX")"
+    chmod 0600 "$DRY_STATE"
+    cat "$STATE_FILE" > "$DRY_STATE"
+    STATE_FILE="$DRY_STATE"
+    # shellcheck disable=SC2064  # expand DRY_STATE now, not at trap time
+    trap "rm -f '$DRY_STATE'" EXIT
+fi
+
+# Layered pre-seed, weakest first:
+#   detected values  →  recipe  →  --answers FILE  →  interactive answers
+# The recipe goes on before --answers so an operator can deviate from a
+# shipped preset for one host without editing a file that's in git.
+if [[ -n "$RECIPE" ]]; then
+    recipe_load "$RECIPE" || exit 1
+fi
+
 # Optional --answers pre-seed. Values in the file override current state.
 if [[ -n "$ANSWERS_FILE" ]]; then
     info "Loading answers from $ANSWERS_FILE"
     state_load_answers "$ANSWERS_FILE"
+fi
+
+# A recipe declares the per-host values it deliberately doesn't carry (SSH
+# public key, swarm join token). Report the missing ones NOW: discovering at
+# step 43 that there's no join token leaves the host hardened, firewalled and
+# half-clustered, which is the worst place to stop.
+if [[ -n "$RECIPE" ]]; then
+    RECIPE_FILE="$(recipe_path "$RECIPE")"
+    MISSING_KEYS="$(recipe_missing_requires "$RECIPE_FILE" | tr '\n' ' ')"
+    if [[ -n "${MISSING_KEYS// /}" ]]; then
+        if [[ $NON_INTERACTIVE -eq 1 ]]; then
+            err "Recipe '${RECIPE}' needs values it does not define: ${MISSING_KEYS}"
+            err "A --non-interactive run cannot prompt for them. Seed them:"
+            err "  sudo ./main.sh --recipe ${RECIPE} --answers ./secrets.env --non-interactive"
+            err ""
+            err "Nothing was configured, but the recipe's answers are now in"
+            err "state.env and the next run will use them as defaults."
+            err "Discard them with:  sudo ./main.sh --reset"
+            exit 1
+        fi
+        warn "Recipe '${RECIPE}' does not define: ${MISSING_KEYS}"
+        warn "You will be prompted for each when its step is reached."
+    fi
 fi
 
 # Apply --redo by clearing completion flags on matched modules. Accepts
@@ -239,12 +365,43 @@ for f in "${ALL_MODULES[@]}"; do
     source "$f"
 done
 
+# --unattended silences the load-bearing confirmations, one of which is
+# 24-ssh-harden's "have you verified SSH from another terminal?". That pause
+# is the only thing between an sshd_config mistake and a box reachable solely
+# by console, so the two are refused together — the same treatment --reset
+# gets from --force-reset, and for the same reason.
+#
+# Checked against the modules this invocation will actually walk, so
+# `--only 27-journald --unattended` is fine, and an answers file that turns
+# SSH hardening off is a deliberate, visible opt-out.
+if [[ $UNATTENDED -eq 1 ]]; then
+    for f in "${ALL_MODULES[@]}"; do
+        [[ "$(mod_name "$f")" == *-ssh-harden ]] || continue
+        if ! state_skipped ssh_harden && ! state_completed ssh_harden; then
+            err "--unattended refuses to run while SSH hardening is in the plan."
+            err "24-ssh-harden pauses for you to confirm SSH still works from a"
+            err "second terminal, and rolls the drop-in back if it doesn't."
+            err "Auto-answering that turns any sshd typo into a permanent lockout."
+            err ""
+            err "Either drop --unattended, or take SSH hardening out of this run:"
+            err "  echo 'STEP_ssh_harden_SKIPPED=yes' >> answers.env"
+            exit 1
+        fi
+    done
+fi
+
 # -----------------------------------------------------------------------------
 # Dry run: enumerate remaining steps
 # -----------------------------------------------------------------------------
 
 if [[ $DRY_RUN -eq 1 ]]; then
     separator "Dry run — step status"
+
+    # Collected while walking the plan, printed underneath it: the prompts a
+    # recipe run will still stop on. Without this, "--recipe X --dry-run" would
+    # imply the run is hands-off when in practice it pauses three times.
+    PENDING_PROMPTS=()
+
     for f in "${ALL_MODULES[@]}"; do
         name="$(mod_name "$f")"
         sfx="$(mod_func_suffix "$name")"
@@ -257,8 +414,37 @@ if [[ $DRY_RUN -eq 1 ]]; then
             echo "  ⊘ $name  [skipped]"
         else
             echo "  … $name  [pending]"
+            # Optional per-module hook: echoes one line per load-bearing
+            # confirmation the step would raise GIVEN the current state, so a
+            # conditional pause (42's restart prompt only fires when
+            # containers are running) isn't announced when it won't happen.
+            if declare -F "critical_prompts_${sfx}" >/dev/null; then
+                while IFS= read -r prompt_line; do
+                    [[ -n "$prompt_line" ]] && PENDING_PROMPTS+=("${name}: ${prompt_line}")
+                done < <("critical_prompts_${sfx}" 2>/dev/null || true)
+            fi
         fi
     done
+
+    if [[ ${#PENDING_PROMPTS[@]} -gt 0 ]]; then
+        separator "Still to be confirmed by a human"
+        for prompt_line in "${PENDING_PROMPTS[@]}"; do
+            echo "  ⏸ $prompt_line"
+        done
+        echo ""
+        info "These are the load-bearing confirmations. --recipe and"
+        info "--non-interactive do NOT answer them; only --unattended does."
+    fi
+
+    if [[ -n "$RECIPE" && -n "${MISSING_KEYS// /}" ]]; then
+        separator "Values this recipe does not define"
+        for missing_key in $MISSING_KEYS; do
+            echo "  ? $missing_key"
+        done
+        echo ""
+        info "Supply them with --answers FILE, or answer the prompt when it appears."
+    fi
+
     exit 0
 fi
 
@@ -284,6 +470,21 @@ for f in "${ALL_MODULES[@]}"; do
         continue
     fi
 
+    # A recipe or answers file turns a whole step off with
+    # STEP_<name>_SKIPPED=yes. Honoured HERE, before configure_, so the
+    # outcome doesn't depend on what the module happens to default its own
+    # y/n to — seeding the flag for a step that defaults to "y" would
+    # otherwise run it anyway.
+    #
+    # Gated on the auto-answer modes on purpose. Interactively, a step skipped
+    # earlier in this state file is deliberately re-asked when the wizard
+    # resumes, so an operator who Ctrl+C'd can change their mind without
+    # reaching for --redo.
+    if [[ $RECIPE_MODE -eq 1 || $NON_INTERACTIVE -eq 1 ]] && state_skipped "$sfx"; then
+        log "⊘ $name — skipped by recipe/answers"
+        continue
+    fi
+
     separator "Step: $name"
 
     # detect_ reads canonical config to populate defaults for configure_ prompts.
@@ -296,10 +497,6 @@ for f in "${ALL_MODULES[@]}"; do
     # Everything else asks its own Y/N inside configure_ and either proceeds
     # or calls state_mark_skipped — main.sh checks that flag below.
     if declare -F "configure_${sfx}" >/dev/null; then
-        if [[ $NON_INTERACTIVE -eq 1 ]]; then
-            export CLOUD_NON_INTERACTIVE=1
-            # Module decides whether to prompt or use seeded state.
-        fi
         "configure_${sfx}"
 
         # Modules set STEP_<sfx>_SKIPPED=yes in configure_ when the operator

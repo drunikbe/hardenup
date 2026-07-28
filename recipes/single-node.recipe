@@ -1,0 +1,52 @@
+# description: Standalone Docker host — hardened, Docker CE, no cluster
+# requires: USER_NAME USER_SSH_KEY
+#
+# One machine running plain containers or a compose stack. No swarm, so no
+# cluster ports and no Raft to protect: this host can auto-reboot for kernel
+# updates like any other standalone server.
+#
+# It grows into a swarm later without reprovisioning:
+#   sudo ./main.sh --recipe swarm-manager --redo 25-firewall
+# (25 owns the cluster ports, so it has to re-run when they're wanted.)
+#
+# Derived, not defined:
+#   HOSTNAME_FQDN         hostnamectl --static
+#   NET_PUBLIC_IFACE/IP   default-route interface (15-networks)
+#   TIMEZONE              the running system's
+#
+# Usage:
+#   sudo ./main.sh --recipe single-node --answers ./secrets.env
+
+# --- Steps this host doesn't need --------------------------------------------
+STEP_vpn_SKIPPED=yes
+STEP_mta_SKIPPED=yes
+STEP_ubuntu_pro_SKIPPED=yes
+STEP_ssh_peers_SKIPPED=yes
+STEP_docker_swarm_SKIPPED=yes
+
+# --- Firewall ----------------------------------------------------------------
+# Still 'no' by default: the target ingress is a Cloudflare Tunnel, which
+# dials out. Set FIREWALL_OPEN_HTTP=yes in an --answers file if this host
+# genuinely publishes 80/443 to the internet itself.
+FIREWALL_OPEN_HTTP=no
+SWARM_PORTS_ENABLED=no
+
+# --- Intrusion detection -----------------------------------------------------
+SECURITY_TOOL=fail2ban
+
+# --- Unattended upgrades -----------------------------------------------------
+# Nothing depends on this host staying up for quorum, so let kernel CVEs get
+# patched unattended. Make sure scheduled backups finish before 04:00 local.
+UNATTENDED_AUTO_REBOOT=yes
+UNATTENDED_REBOOT_TIME=04:00
+
+# --- Container runtime -------------------------------------------------------
+CONTAINER_RUNTIME=docker
+STEP_docker_SELECTED=yes
+DOCKER_REMOVE_CONFLICTS=yes
+DOCKER_ADD_USER=yes
+DOCKER_FIREWALL_MODE=docker-user
+
+# --- Docker daemon -----------------------------------------------------------
+DOCKER_LOG_MAX_SIZE=50m
+DOCKER_LOG_MAX_FILE=5

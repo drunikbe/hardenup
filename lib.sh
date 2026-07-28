@@ -28,7 +28,13 @@
 #   ask_input PROMPT [DEFAULT] [REGEX]      Free text      -> sets REPLY
 #   ask_input_optional PROMPT [DEF] [RE]    Free text, blank allowed -> sets REPLY
 #   (all four honour NON_INTERACTIVE=1 by taking the default)
+#   ask_confirm_critical PROMPT [DEFAULT]   Load-bearing y/n -> returns 0=yes, 1=no
 #   ask_password PROMPT [MIN_LEN]           Hidden input   -> sets REPLY
+#
+# PROMPT MODES (set by main.sh from its flags; see "Prompt modes" below)
+#   NON_INTERACTIVE=1   every prompt takes its default
+#   RECIPE_MODE=1       prompts with a default take it; prompts without one ask
+#   UNATTENDED=1        load-bearing confirmations take their default too
 #   ask_multiselect PROMPT OPT...           Toggle list    -> sets MULTISELECT_RESULT array ("on"/"off")
 #
 # VALIDATORS                                All return 0=valid, 1=invalid
@@ -106,6 +112,51 @@ banner() {
 # =============================================================================
 # Interactive Prompts
 # =============================================================================
+#
+# Prompt modes
+# ------------
+# Three orthogonal flags decide whether a prompt is shown. They exist because
+# "don't ask me" is not one setting — a recipe wants its own answers used
+# without confirming each one, while still stopping for the per-host values it
+# deliberately left undefined, and stopping for the handful of confirmations
+# that exist to prevent locking the operator out of the box.
+#
+#   NON_INTERACTIVE=1  Every ordinary prompt takes its default. ask_input with
+#                      NO default is a hard error — there is nothing to fall
+#                      back on, so it says which value to seed and exits.
+#
+#   RECIPE_MODE=1      Ordinary prompts with a resolved default take it
+#                      silently (the default IS the recipe's answer, because
+#                      the recipe seeded the state key the prompt defaults
+#                      from). ask_input with no default falls through and ASKS
+#                      — that's how per-host secrets the recipe declined to
+#                      carry (SSH public key, swarm join token) still reach a
+#                      human.
+#
+#   UNATTENDED=1       Load-bearing confirmations — the ones routed through
+#                      ask_confirm_critical — take their default as well.
+#                      Nothing else changes. main.sh requires this to be asked
+#                      for explicitly and refuses it when SSH hardening is in
+#                      the plan.
+#
+# ask_confirm_critical deliberately ignores the first two. A run that
+# auto-answers "yes, I verified SSH works in another terminal" has removed the
+# only thing standing between an sshd typo and a box you cannot log into.
+
+# Echo which auto-answer mode is in force, for the log line that records a
+# decision taken on the operator's behalf.
+_auto_mode_label() {
+    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
+        printf 'non-interactive default'
+    else
+        printf 'recipe'
+    fi
+}
+
+# True when ordinary prompts should take their default without asking.
+_prompt_is_auto() {
+    [[ "${NON_INTERACTIVE:-0}" -eq 1 || "${RECIPE_MODE:-0}" -eq 1 ]]
+}
 
 # ask_choice "prompt" default_num "Label|Description" ...
 # Presents a numbered menu. Sets REPLY to the chosen index (1-based).
@@ -137,8 +188,8 @@ ask_choice() {
         printf "  ${BOLD}%d)${NC} %-16s— %s%s\n" "$num" "${labels[$i]}" "${descs[$i]}" "$marker"
     done
 
-    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
-        info "${prompt} -> ${default} (non-interactive default)"
+    if _prompt_is_auto; then
+        info "${prompt} -> ${default} ($(_auto_mode_label))"
         REPLY="$default"
         return 0
     fi
@@ -157,33 +208,22 @@ ask_choice() {
     done
 }
 
-# ask_yesno "prompt" default(y/n)
-# Returns 0 for yes, 1 for no. Presents a numbered menu like ask_choice.
-ask_yesno() {
-    local prompt="$1"
-    local default="${2:-n}"
+# Render the yes/no menu and read an answer. No mode handling — callers decide
+# whether asking is appropriate. Split out of ask_yesno so
+# ask_confirm_critical can reach the terminal even when the ordinary prompts
+# are being auto-answered.
+_ask_yesno_tty() {
+    local prompt="$1" default="${2:-n}"
 
     # Map y/n default to a 1-based menu index.
     local default_num=2
-    if [[ "$default" == "y" ]]; then
-        default_num=1
-    fi
+    [[ "$default" == "y" ]] && default_num=1
 
     local marker_yes="" marker_no=""
     if [[ "$default_num" -eq 1 ]]; then
         marker_yes=" [default]"
     else
         marker_no=" [default]"
-    fi
-
-    # Headless mode: take the default instead of reading. Without this the
-    # read below hits EOF and exits 1 with "stdin closed", which is why
-    # --non-interactive could never get past the first module's prompt.
-    # The choice is logged so a headless run's transcript still shows what
-    # was decided on the operator's behalf.
-    if [[ "${NON_INTERACTIVE:-0}" -eq 1 ]]; then
-        info "${prompt} -> $([[ $default_num -eq 1 ]] && echo Yes || echo No) (non-interactive default)"
-        [[ $default_num -eq 1 ]] && return 0 || return 1
     fi
 
     echo ""
@@ -201,6 +241,62 @@ ask_yesno() {
             *) err "Invalid choice. Enter 1 or 2." ;;
         esac
     done
+}
+
+# ask_yesno "prompt" default(y/n)
+# Returns 0 for yes, 1 for no. Presents a numbered menu like ask_choice.
+ask_yesno() {
+    local prompt="$1"
+    local default="${2:-n}"
+
+    # Headless / recipe mode: take the default instead of reading. Without this
+    # the read hits EOF and exits 1 with "stdin closed", which is why
+    # --non-interactive could never get past the first module's prompt.
+    # The choice is logged so the run's transcript still shows what was
+    # decided on the operator's behalf.
+    if _prompt_is_auto; then
+        info "${prompt} -> $([[ "$default" == "y" ]] && echo Yes || echo No) ($(_auto_mode_label))"
+        [[ "$default" == "y" ]] && return 0 || return 1
+    fi
+
+    _ask_yesno_tty "$prompt" "$default"
+}
+
+# ask_confirm_critical "prompt" default(y/n)
+#
+# A load-bearing confirmation: the pauses that exist because auto-answering
+# them can leave the operator locked out of a remote host with no way back
+# except console access. CLAUDE.md enumerates them; the current set is
+# 21-user's "continue with no non-root user", 24-ssh-harden's "verified in a
+# second terminal", 25-firewall's VPN-only SSH scope and 42-docker-daemon's
+# "restart Docker while containers are running".
+#
+# Deliberately ignores NON_INTERACTIVE and RECIPE_MODE — the whole point of a
+# recipe is to skip the questions whose wrong answer is merely inconvenient,
+# and these are not those. Only UNATTENDED=1, which main.sh makes the operator
+# ask for by name, silences them.
+#
+# With no terminal and no UNATTENDED this returns 1 (the conservative answer
+# in every current call site: roll the change back / don't restart) after
+# saying exactly which flag would have allowed it through.
+ask_confirm_critical() {
+    local prompt="$1" default="${2:-n}"
+
+    if [[ "${UNATTENDED:-0}" -eq 1 ]]; then
+        warn "UNATTENDED — auto-answering a load-bearing confirmation:"
+        warn "  ${prompt} -> $([[ "$default" == "y" ]] && echo Yes || echo No)"
+        [[ "$default" == "y" ]] && return 0 || return 1
+    fi
+
+    if [[ ! -t 0 ]]; then
+        err "This confirmation cannot be auto-answered:"
+        err "  ${prompt}"
+        err "stdin is not a terminal. Re-run attached to one, or pass"
+        err "--non-interactive --unattended to accept the documented default."
+        return 1
+    fi
+
+    _ask_yesno_tty "$prompt" "$default"
 }
 
 # ask_input "prompt" default [regex]
@@ -225,6 +321,16 @@ ask_input() {
             exit 1
         fi
         info "${prompt} -> ${default:-<empty>} (non-interactive default)"
+        REPLY="$default"
+        return 0
+    fi
+
+    # Recipe mode: a resolved default IS the recipe's answer, because the
+    # recipe seeded the state key this prompt defaults from. With NO default
+    # the recipe defined nothing here — that's the per-host secret case
+    # (SSH public key, swarm join token), so fall through and ask a human.
+    if [[ "${RECIPE_MODE:-0}" -eq 1 && -n "$default" ]]; then
+        info "${prompt} -> ${default} (recipe)"
         REPLY="$default"
         return 0
     fi
@@ -517,6 +623,17 @@ require_cmd() {
 ensure_tmux() {
     # (1) Already inside tmux — nothing to do.
     [[ -n "${TMUX:-}" ]] && return 0
+
+    # (1b) No terminal at all — cloud-init, a CI job, a pipe. tmux cannot
+    # allocate a session without one and dies with "open terminal failed",
+    # which took the whole run down before a single module executed. There is
+    # also nothing to protect: session protection exists so an SSH disconnect
+    # doesn't kill a half-applied run, and a headless invocation has no SSH
+    # session to lose. This is what makes --non-interactive genuinely usable
+    # from cloud-init rather than only from an operator's terminal.
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        return 0
+    fi
 
     # Prefix with "cloud-" so our sessions are identifiable and don't collide
     # with unrelated tmux sessions the operator may already have.

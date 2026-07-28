@@ -68,6 +68,17 @@ configure_ssh_harden() {
     fi
 }
 
+# Announced by `main.sh --dry-run` so a recipe run's pauses are visible in
+# advance. run_ raises the pause only when a non-root user exists to test the
+# new config with; at plan time USER_NAME may not have been answered yet, so
+# announce whenever 21-user is also going to run — that's when one will.
+critical_prompts_ssh_harden() {
+    if [[ -n "$(state_get USER_NAME)" ]] || ! state_skipped user; then
+        echo "confirm SSH still works from a second terminal (rolls back on 'no')"
+    fi
+    return 0
+}
+
 check_ssh_harden() {
     [[ -f "$SSH_HARDENING_FILE" ]] || return 1
     grep -q "^Port $(state_get SSH_PORT)\$" "$SSH_HARDENING_FILE"
@@ -128,7 +139,7 @@ EOF
         warn "  ssh -p ${ssh_port} ${user}@<this-server-ip>"
         warn "═══════════════════════════════════════════════════════════════"
         echo ""
-        if ! ask_yesno "Have you verified SSH access in another terminal?" "n"; then
+        if ! ask_confirm_critical "Have you verified SSH access in another terminal?" "n"; then
             warn "Rolling back SSH hardening..."
             rm -f "$SSH_HARDENING_FILE"
             systemctl reload "$SSH_SERVICE"

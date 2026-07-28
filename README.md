@@ -44,11 +44,71 @@ sudo ./main.sh --only 25-firewall               # run exactly one step
 sudo ./main.sh --redo 24-ssh-harden             # re-run a completed step
 sudo ./main.sh --redo "2*"                      # re-run matching glob (whole 20-29)
 sudo ./main.sh --answers FILE --non-interactive # headless run (KEY="VALUE" lines)
+sudo ./main.sh --recipe swarm-worker            # apply a shipped preset
+sudo ./main.sh --recipe --list                  # list available presets
 sudo ./main.sh --reset                          # wipe state.env + re-ask everything
 sudo ./main.sh --force-reset                    # --reset without confirmation
 ```
 
 `--redo` and `--only` are mutually exclusive (`--redo` mutates persistent state; `--only` just narrows this invocation). Use them in separate runs.
+
+## Recipes
+
+Building the fourth identical swarm node shouldn't mean walking 21 interactive steps. A recipe is a named preset in `recipes/` that answers everything a known host type implies:
+
+```bash
+sudo ./main.sh --recipe --list                                   # what's available
+sudo ./main.sh --recipe swarm-manager --dry-run                  # preview the plan
+sudo ./main.sh --recipe swarm-manager --answers ./secrets.env    # run it
+```
+
+| Recipe | Host type |
+|--------|-----------|
+| `swarm-manager` | First manager of a cluster — hardened host, Docker CE, `docker swarm init` |
+| `swarm-worker` | Joins an existing swarm; needs a join token and a manager address |
+| `single-node` | Standalone Docker host, no cluster |
+
+Answers layer weakest-first, so `--answers` stays the escape hatch for a one-off deviation without editing a file that's in git:
+
+```
+detected values  →  recipe  →  --answers FILE  →  interactive answers
+```
+
+**Recipes carry policy, not facts.** Hostname, public interface, swarm advertise address and node subnet are all derived from the running machine, which is what lets the same recipe work unmodified on the next box. Verified on a Pi 5: `swarm-manager` produced `10.0.0.0/24` as the node subnet and `10.0.0.169` as the advertise address without either appearing in the file.
+
+**Recipes never carry secrets.** `USER_SSH_KEY`, `SWARM_JOIN_TOKEN`, `UBUNTU_PRO_TOKEN`, `MTA_PASSWORD` and friends are declared in the recipe's `# requires:` header instead. Missing ones are reported before the first step runs, not at step 43 with the host half-configured. Supply them via `--answers`, or answer the prompt when it appears.
+
+### How much it still asks
+
+| Mode | Behaviour |
+|------|-----------|
+| *(none)* | Every prompt asked. |
+| `--recipe NAME` | The recipe's answers are used without confirming each one. Values it deliberately doesn't define are still asked for, and so are the safety confirmations. |
+| `--non-interactive` | Every ordinary prompt takes its default; one with no default is a hard error naming the key to seed. Safety confirmations still stop the run. |
+| `--unattended` | Also auto-answers the safety confirmations. Must be combined with `--non-interactive`. |
+
+The safety confirmations are the handful of pauses whose wrong answer costs you the box — 24-ssh-harden's *"have you verified SSH from a second terminal?"* (which rolls the config back on `n`), 25-firewall's VPN-only SSH scope, 42-docker-daemon's *"restart Docker while containers are running?"*. `--recipe` and `--non-interactive` do **not** answer these.
+
+`--unattended` is refused outright while SSH hardening is in the plan — the same treatment `--reset` gets from `--force-reset`, and for the same reason. Take it out of the run deliberately if you mean it:
+
+```bash
+echo 'STEP_ssh_harden_SKIPPED=yes' >> answers.env
+```
+
+### Writing your own
+
+Drop a `recipes/<name>.recipe` file next to the shipped ones. It's a plain `KEY=VALUE` file — parsed, never sourced, so it can't execute code — with metadata in `#` comments:
+
+```
+# description: one line, shown by --recipe --list
+# requires: USER_NAME USER_SSH_KEY
+
+STEP_vpn_SKIPPED=yes          # turn a whole step off
+FIREWALL_OPEN_HTTP=no         # answer a sub-question
+SWARM_MODE=init
+```
+
+Any state key works. `STEP_<name>_SKIPPED=yes` removes a step from the run entirely.
 
 ## How the wizard works
 
@@ -143,6 +203,8 @@ Deliberately not automatic:
 main.sh         wizard orchestrator
 state.sh        ephemeral-per-run state helpers
 lib.sh          shared functions (prompts, validators, detection)
+recipes.sh      recipe discovery + loading
+recipes/        shipped presets (*.recipe)
 modules/        numbered steps
 CLAUDE.md       maintainer notes + gotchas
 ```
