@@ -243,6 +243,11 @@ Packages are opt-in (`--packages`) — removing `docker-ce` takes every containe
 ## Conventions
 
 - **Idempotent by overwrite.** Every module that writes a config file uses `cat > file <<EOF` (truncating write), never `>>` (append). Re-running produces identical end state.
+- **Prefer what's already installed; don't add a second implementation.** Before adding a package, check `apt-cache show <pkg> | grep Priority`. `required`/`important`/`standard` means Ubuntu already ships it and installing it is noise. Check harder if the package *duplicates* something preinstalled: `net-tools` was installed for years while every network read in this repo used `ip` from `iproute2` (priority=important), and `apt-transport-https` is a dummy transitional package because apt has done https natively for years. Both are gone — don't reintroduce them.
+
+  Where a *category* of tool may already be present, detect rather than dictate. `28-timezone` accepts chrony, timesyncd, ntpsec or ntp and installs only when none is there, because two NTP daemons fighting over the clock is worse than none. Same reasoning applies to anything else with interchangeable implementations.
+
+  When a package genuinely is needed, install only what's missing (`dpkg -s` first) so a stock image doesn't pay for an apt round-trip on every run, and call `record_pkg_installed` before installing so undo knows it was ours.
 - **One responsibility per module.** If you're adding two unrelated things to a module, split it. Numbering has reserve slots specifically for insertion.
 - **Shared helpers live in `lib.sh`.** Don't reinvent `ask_*`, `validate_*`, `detect_*`, `wait_for`, `require_root`, `ensure_tmux` in modules. Add to `lib.sh` if a pattern reappears.
 - **Inline rationale, not WHAT.** Module headers explain WHY a config choice exists (load-bearing reasons, incident history, upstream-bug references). Don't repeat what the next five lines of bash obviously do.

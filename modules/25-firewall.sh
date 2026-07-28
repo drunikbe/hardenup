@@ -207,8 +207,12 @@ verify_firewall() {
 }
 
 run_firewall() {
-    record_pkg_installed ufw
-    apt-get install -y -qq ufw 2>/dev/null
+    # ufw is priority=standard and ships on a default Ubuntu install, so this
+    # is normally a no-op — but only call apt when it genuinely isn't there.
+    if ! dpkg -s ufw >/dev/null 2>&1; then
+        record_pkg_installed ufw
+        apt-get install -y -qq ufw 2>/dev/null
+    fi
 
     # `ufw --force reset` below deletes every existing rule. On a host that
     # already had a firewall — a rule for a database port, a VPN allow, a
