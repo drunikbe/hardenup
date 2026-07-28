@@ -1,0 +1,65 @@
+# description: Docker Swarm manager — hardened host, Docker CE, initialises the swarm
+# requires: USER_NAME USER_SSH_KEY
+#
+# The FIRST manager of a cluster. Creates the swarm and prints the join tokens
+# the other nodes need; run swarm-worker (or this recipe with SWARM_MODE=join)
+# on the rest.
+#
+# Quorum: go 1 manager -> 3, never linger on 2. Raft quorum is floor(N/2)+1,
+# so two managers tolerate ZERO failures — strictly worse than one. Join the
+# 2nd and 3rd managers ONE AT A TIME, waiting for 'Ready' in `docker node ls`.
+#
+# Derived, not defined — do not add these, they'd stop the recipe working
+# unmodified on a second machine:
+#   HOSTNAME_FQDN         hostnamectl --static
+#   NET_PUBLIC_IFACE/IP   default-route interface (15-networks)
+#   SWARM_ADVERTISE_ADDR  this node's private, else public, IP (43)
+#   SWARM_NODE_CIDR       the node subnet computed from the NIC (25)
+#   TIMEZONE              the running system's
+#
+# Usage:
+#   sudo ./main.sh --recipe swarm-manager --answers ./secrets.env
+# where secrets.env carries USER_NAME and USER_SSH_KEY.
+
+# --- Steps this host doesn't need --------------------------------------------
+# No VPN: swarm control-plane traffic rides the node subnet, and SSH stays on
+# the LAN. No mail relay, no Ubuntu Pro seat, no inbound peer keys.
+STEP_vpn_SKIPPED=yes
+STEP_mta_SKIPPED=yes
+STEP_ubuntu_pro_SKIPPED=yes
+STEP_ssh_peers_SKIPPED=yes
+
+# --- Firewall ----------------------------------------------------------------
+# Ingress is a Cloudflare Tunnel: cloudflared dials OUT, so nothing inbound
+# needs opening on the public interface. The four swarm ports are opened only
+# to SWARM_NODE_CIDR, which 25-firewall derives from this host's own subnet.
+FIREWALL_OPEN_HTTP=no
+SWARM_PORTS_ENABLED=yes
+
+# --- Intrusion detection -----------------------------------------------------
+# fail2ban: no external account, no enrolment key, works offline. Switch to
+# crowdsec in an --answers file if you want the shared blocklists.
+SECURITY_TOOL=fail2ban
+
+# --- Unattended upgrades -----------------------------------------------------
+# Auto-reboot OFF. Three managers rebooting together at 04:00 lose Raft
+# quorum, and an unplanned control-plane outage is worse than a kernel patch
+# waiting for a maintenance window. Reboot managers by hand, one at a time.
+UNATTENDED_AUTO_REBOOT=no
+
+# --- Container runtime -------------------------------------------------------
+CONTAINER_RUNTIME=docker
+STEP_docker_SELECTED=yes
+DOCKER_REMOVE_CONFLICTS=yes
+DOCKER_ADD_USER=yes
+# DOCKER-USER chain rather than a provider firewall: a Pi/LAN cluster has no
+# cloud firewall in front of it, and Docker's own iptables rules bypass UFW.
+DOCKER_FIREWALL_MODE=docker-user
+
+# --- Docker daemon -----------------------------------------------------------
+# 50m x 5 = 250 MB of logs per container before the oldest are dropped.
+DOCKER_LOG_MAX_SIZE=50m
+DOCKER_LOG_MAX_FILE=5
+
+# --- Swarm -------------------------------------------------------------------
+SWARM_MODE=init

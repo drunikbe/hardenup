@@ -84,7 +84,15 @@ configure_docker_swarm() {
         return 0
     fi
 
-    if ! ask_yesno "Set up Docker Swarm on this host?" "n"; then
+    # Default "n" — clustering a host is opt-in. It follows SWARM_MODE when
+    # that's already set, which is what lets a recipe (or a re-run after
+    # --redo) turn the step on: with a hard-coded "n" the swarm recipes would
+    # take the default under --recipe and skip the one step they exist for.
+    local default="n"
+    case "$(state_get SWARM_MODE)" in
+        init|join) default="y" ;;
+    esac
+    if ! ask_yesno "Set up Docker Swarm on this host?" "$default"; then
         state_set SWARM_MODE none
         state_mark_skipped docker_swarm
         return 0

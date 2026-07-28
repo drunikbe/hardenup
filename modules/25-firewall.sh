@@ -62,7 +62,11 @@ configure_firewall() {
     #   sudo ./main.sh --redo 25-firewall
     info "A Cloudflare Tunnel needs no inbound ports — cloudflared dials out."
     info "Answer 'n' if this host is tunnel-fronted; 'y' if you publish 80/443."
-    if ask_yesno "Open HTTP/HTTPS (80/443) on the public interface?" "y"; then
+    # Default follows state so a recipe (or a previous run) can decide this.
+    # A hard-coded "y" here would silently open 80/443 on every recipe host.
+    local http_default="y"
+    [[ "$(state_get FIREWALL_OPEN_HTTP)" == "no" ]] && http_default="n"
+    if ask_yesno "Open HTTP/HTTPS (80/443) on the public interface?" "$http_default"; then
         state_set FIREWALL_OPEN_HTTP yes
     else
         state_set FIREWALL_OPEN_HTTP no
@@ -182,8 +186,42 @@ _configure_ssh_scope() {
         opts+=("${labels[$i]}|${descs[$i]}")
     done
 
-    ask_choice "Where should SSH be reachable from?" "1" "${opts[@]}"
+    # Default follows state (a recipe, or a previous run's answer) but falls
+    # back to "Anywhere" — opt-in restriction, never inferred. The scope list
+    # is built from what this host actually has, so a seeded value that isn't
+    # on offer here (vpn_only with no VPN) is ignored rather than silently
+    # producing a firewall with no way in.
+    local scope_default=1 want
+    want="$(state_get SSH_SCOPE)"
+    for i in "${!scopes[@]}"; do
+        [[ "${scopes[$i]}" == "$want" ]] && scope_default=$((i + 1))
+    done
+
+    ask_choice "Where should SSH be reachable from?" "$scope_default" "${opts[@]}"
     state_set SSH_SCOPE "${scopes[$((REPLY - 1))]}"
+
+    # vpn_only is the one answer here that can leave the host unreachable by
+    # every path except the VPN. Confirmed explicitly, on every route in —
+    # including a recipe that seeded it — because the recovery story is
+    # "phone your hosting provider for console access", and not every
+    # provider has one.
+    if [[ "$(state_get SSH_SCOPE)" == vpn_only ]]; then
+        warn "SSH will be blocked on the public AND private interfaces."
+        warn "The ONLY remaining path in is $(state_get VPN_IFACE 'the VPN interface')."
+        warn "If the VPN breaks you need console/serial access from your provider."
+        if ! ask_confirm_critical "Restrict SSH to the VPN interface only?" "n"; then
+            state_set SSH_SCOPE no_public
+            warn "Kept SSH reachable on the private interface (scope: no_public)."
+        fi
+    fi
+}
+
+# Announced by `main.sh --dry-run`. Only the VPN-only scope pauses; the other
+# two scopes commit nothing that can't be undone from a working SSH session.
+critical_prompts_firewall() {
+    [[ "$(state_get SSH_SCOPE)" == vpn_only ]] \
+        && echo "confirm restricting SSH to the VPN interface only (console-recovery risk)"
+    return 0
 }
 
 check_firewall()  { return 1; }  # UFW reset is cheap; always re-run.

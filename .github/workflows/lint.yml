@@ -36,4 +36,4 @@ jobs:
         # each module's `source ../lib.sh`) get analyzed as a unit.
         # -S style is the strictest default severity — the repo is clean at
         # this level today, so keep it here to catch regressions early.
-        run: shellcheck -x -S style main.sh lib.sh state.sh modules/*.sh
+        run: shellcheck -x -S style main.sh lib.sh state.sh recipes.sh backup.sh undo.sh modules/*.sh

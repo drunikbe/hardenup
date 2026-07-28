@@ -88,6 +88,17 @@ configure_docker_daemon() {
     state_set DOCKER_LOG_MAX_FILE "$REPLY"
 }
 
+# Announced by `main.sh --dry-run`. Conditional on containers actually
+# running right now, which is exactly when run_ raises the prompt — on an
+# idle node there is nothing to stop and no pause.
+critical_prompts_docker_daemon() {
+    local running
+    running="$(docker ps -q 2>/dev/null | wc -l)"
+    [[ "$running" -gt 0 ]] \
+        && echo "restart Docker, stopping ${running} running container(s)"
+    return 0
+}
+
 # True when daemon.json already carries exactly the requested rotation.
 check_docker_daemon() {
     [[ -f "$DOCKER_DAEMON_JSON" ]] || return 1
@@ -168,7 +179,7 @@ run_docker_daemon() {
         warn "Docker log settings cannot be applied with a reload — only a"
         warn "restart works. On a swarm node the cluster reschedules services;"
         warn "standalone containers with a restart policy come back on their own."
-        if ! ask_yesno "Restart the Docker daemon now?" "y"; then
+        if ! ask_confirm_critical "Restart the Docker daemon now?" "y"; then
             warn "Skipped the restart. daemon.json is written but NOT yet active."
             warn "Apply it later with:  sudo systemctl restart docker"
             return 0

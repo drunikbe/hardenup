@@ -186,3 +186,103 @@ Also fixed while here: the mail prompt was labelled "(blank to skip)" but
 `ask_input` loops on empty input, so the no-mail path was unreachable — an
 operator without a relay had to invent an address. It is now gated behind its
 own y/n.
+
+### Recipes (#30) rested on three premises that were wrong
+
+The issue proposed building recipes on `--answers`, `--non-interactive` and
+`STEP_<name>_SKIPPED=yes`, on the grounds that all three already worked. Two
+of the three did not, and the third only half did.
+
+**1. `STEP_*` keys were silently dropped from every answers file.**
+`state_load_answers` matched `^[A-Z_][A-Z0-9_]*=`, which does not match
+`STEP_docker_SELECTED` — the module-derived middle segment is lowercase. So
+the documented "put `STEP_<name>_SKIPPED=yes` in an answers file to turn a
+step off" had never worked; the line was skipped as if it were a comment.
+Verified before changing anything:
+
+```
+$ [[ "STEP_docker_SELECTED=yes" =~ ^[A-Z_][A-Z0-9_]*= ]] && echo match || echo no
+no
+$ [[ "SSH_PORT=2222" =~ ^[A-Z_][A-Z0-9_]*= ]] && echo match || echo no
+match
+```
+
+Now `^[A-Z_][A-Za-z0-9_]*=`. It must still start uppercase — that is what
+keeps stray shell (`if [[ ... ]]`, `foo() {`) from being read as an
+assignment by a parser that deliberately never sources the file.
+
+**2. `--non-interactive` could not run headless.** `ensure_tmux` re-execs into
+a fresh tmux session before any module runs, and tmux cannot allocate one
+without a terminal:
+
+```
+$ sudo ./main.sh --recipe swarm-worker --non-interactive
+[OK] Re-launching inside tmux session 'cloud-main'
+open terminal failed: not a terminal
+```
+
+Which means the flag only ever worked from an operator's terminal — the exact
+situation it exists to avoid. `ensure_tmux` now returns early when stdin or
+stdout isn't a tty. There is nothing to protect in that case: session
+protection exists so a dropped SSH connection can't strand a half-applied
+run, and a cloud-init invocation has no SSH session to drop.
+
+**3. A recipe can only steer a prompt whose default comes from state.**
+Recipe mode makes a prompt take its *default*, so `ask_yesno "Open
+HTTP/HTTPS?" "y"` ignores whatever the recipe put in `FIREWALL_OPEN_HTTP`.
+Four prompts needed converting to the `state_get`-derived idiom the rest of
+the repo already used: 25's HTTP toggle, 25's SSH-scope `ask_choice`, 40's
+docker-group toggle, and — worst — 43's top-level y/n, which defaults to `n`,
+so both swarm recipes were skipping the one step they exist for.
+
+### `--dry-run` was writing to the live state file
+
+Pre-seeding is a write: `state_set` writes through to `state.env`. So
+`--recipe X --dry-run`, a command whose entire purpose is to change nothing,
+left all of the recipe's answers behind for the next real run to inherit
+silently. Observed on the box — `state.env` held all 16 of swarm-manager's
+keys after a dry run. `--dry-run` now loads the real state (the plan has to
+reflect genuinely completed steps) and then repoints `STATE_FILE` at a
+throwaway copy in the same tmpfs directory. It also no longer re-execs into
+tmux, which is why the command above could not be run from a non-terminal at
+all.
+
+### Verified on the box (Pi 5, 26.04 arm64, swarm01)
+
+End to end, `--recipe swarm-manager` driving real modules with zero prompts:
+
+- **20-hostname** — took `swarm01` from `hostnamectl`. The recipe carries no
+  hostname, which is the point: the same file works on the next node.
+- **15-networks** — derived `eth0` / `10.0.0.169`, correctly answered "no
+  private network" on this single-NIC host.
+- **42-docker-daemon** — wrote `50m` × `5` from the recipe, restarted dockerd,
+  verify passed against `/etc/docker/daemon.json`.
+- **43-docker-swarm** — `docker swarm init --advertise-addr 10.0.0.169`, with
+  the address derived from the NIC rather than named in the file. Node came up
+  `Ready` / `Leader`. The swarm was left afterwards to restore the box.
+- **25-firewall's derivations**, exercised through `configure_` only:
+  `SWARM_NODE_CIDR=10.0.0.0/24` from `_local_subnet_of eth0`, and
+  `FIREWALL_OPEN_HTTP=no` surviving from the recipe (which is what proves the
+  hard-coded-default fix landed). The resulting swarm-port rules were checked
+  with `ufw --dry-run`, which applies nothing:
+  `-A ufw-user-input -p tcp --dport 2377 -s 10.0.0.0/24 -j ACCEPT`.
+
+The safety property, tested against a real pty:
+
+| mode | `ask_confirm_critical` behaviour |
+|------|----------------------------------|
+| `RECIPE_MODE=1`, terminal | renders the menu and reads the answer |
+| `NON_INTERACTIVE=1`, terminal | renders the menu and reads the answer |
+| either, no terminal, no `--unattended` | refuses with the flag name, returns "no" |
+| `UNATTENDED=1` | takes the default, logged at WARN |
+
+and `--unattended` is refused outright while 24-ssh-harden is in the plan,
+with `STEP_ssh_harden_SKIPPED=yes` as the deliberate opt-out (confirmed the
+escape hatch is accepted once set).
+
+**Not verified.** UFW was never enabled — this session rides SSH from
+10.0.0.101 over the rules 25-firewall installs, so the firewall step was
+checked with `ufw --dry-run` only, as in earlier sessions. 24-ssh-harden was
+not run against live sshd for the same reason; its confirmation prompt was
+tested as a function, not as a step. Multi-node join (`swarm-worker` against a
+real manager) still needs a second Pi — see #20.

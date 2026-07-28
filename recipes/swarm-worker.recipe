@@ -1,0 +1,57 @@
+# description: Docker Swarm worker — hardened host, Docker CE, joins an existing swarm
+# requires: USER_NAME USER_SSH_KEY SWARM_JOIN_TOKEN SWARM_MANAGER_ADDR
+#
+# Runs containers; no Raft membership. Workers can join in parallel and in any
+# number — the one-at-a-time rule only applies to managers.
+#
+# Get the token on a manager:
+#   docker swarm join-token -q worker
+#
+# Derived, not defined:
+#   HOSTNAME_FQDN         hostnamectl --static
+#   NET_PUBLIC_IFACE/IP   default-route interface (15-networks)
+#   SWARM_NODE_CIDR       the node subnet computed from the NIC (25)
+#   TIMEZONE              the running system's
+#
+# Usage:
+#   sudo ./main.sh --recipe swarm-worker --answers ./secrets.env
+# where secrets.env carries USER_NAME, USER_SSH_KEY, SWARM_JOIN_TOKEN and
+# SWARM_MANAGER_ADDR (host:port, e.g. 10.0.0.10:2377). Keep that file out of
+# git — the worker token is enough to attach a node to your cluster.
+
+# --- Steps this host doesn't need --------------------------------------------
+STEP_vpn_SKIPPED=yes
+STEP_mta_SKIPPED=yes
+STEP_ubuntu_pro_SKIPPED=yes
+STEP_ssh_peers_SKIPPED=yes
+
+# --- Firewall ----------------------------------------------------------------
+# Same reasoning as swarm-manager: Cloudflare Tunnel ingress needs no inbound
+# public port; the swarm ports are scoped to the node subnet.
+FIREWALL_OPEN_HTTP=no
+SWARM_PORTS_ENABLED=yes
+
+# --- Intrusion detection -----------------------------------------------------
+SECURITY_TOOL=fail2ban
+
+# --- Unattended upgrades -----------------------------------------------------
+# Auto-reboot ON, unlike the manager recipe: a worker holds no Raft state, and
+# the swarm reschedules its services elsewhere while it restarts. Kernel CVEs
+# then get patched without anyone being paged.
+UNATTENDED_AUTO_REBOOT=yes
+UNATTENDED_REBOOT_TIME=04:00
+
+# --- Container runtime -------------------------------------------------------
+CONTAINER_RUNTIME=docker
+STEP_docker_SELECTED=yes
+DOCKER_REMOVE_CONFLICTS=yes
+DOCKER_ADD_USER=yes
+DOCKER_FIREWALL_MODE=docker-user
+
+# --- Docker daemon -----------------------------------------------------------
+DOCKER_LOG_MAX_SIZE=50m
+DOCKER_LOG_MAX_FILE=5
+
+# --- Swarm -------------------------------------------------------------------
+SWARM_MODE=join
+SWARM_JOIN_ROLE=worker

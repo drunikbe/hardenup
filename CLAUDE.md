@@ -53,6 +53,106 @@ This is how the profile gating was eliminated: `40-runtime.sh` unconditionally a
 
 ---
 
+## Recipes and prompt modes
+
+`recipes/<name>.recipe` is a curated answers file that ships with the tool.
+`recipes.sh` finds and loads them; `main.sh --recipe <name>` applies one.
+Nothing about a recipe is a new execution path — it seeds state through the
+same `state_load_answers` that `--answers` uses, and every module runs exactly
+as it would interactively.
+
+### The three prompt modes are not one dial
+
+`lib.sh` reads three independent flags. Conflating them is how a preset
+becomes a lockout:
+
+| Flag | Ordinary prompts | `ask_input` with NO default | `ask_confirm_critical` |
+|------|------------------|-----------------------------|------------------------|
+| *(none)* | asked | asked | asked |
+| `RECIPE_MODE=1` | take default | **asked** | asked |
+| `NON_INTERACTIVE=1` | take default | hard error naming the key | asked |
+| `UNATTENDED=1` | (unchanged) | (unchanged) | take default |
+
+The load-bearing row is `RECIPE_MODE`'s middle cell. A prompt whose default is
+non-empty has been answered by the recipe (the recipe seeded the state key the
+prompt defaults from); a prompt with *no* default is one the recipe
+deliberately declined to carry — a per-host secret — so it falls through and
+asks a human. That single rule is what makes "answers what it defines, stops
+for what it doesn't" fall out of the existing prompt helpers instead of
+needing a parallel prompting path.
+
+`UNATTENDED` is orthogonal and additive: it changes nothing except the
+confirmations. `main.sh` refuses it without `--non-interactive`, and refuses it
+outright while `24-ssh-harden` is in the plan.
+
+### Gotcha: a recipe can only steer a prompt whose default comes from state
+
+`ask_yesno "Open HTTP/HTTPS?" "y"` with a hard-coded default ignores whatever
+the recipe put in `FIREWALL_OPEN_HTTP` — recipe mode takes the *default*, not
+the state key. Four prompts had to be converted to the
+`[[ "$(state_get KEY)" == ... ]] && default=...` idiom before the shipped
+recipes worked: 25's HTTP toggle, 25's SSH-scope `ask_choice`, 40's
+docker-group toggle, and 43's top-level y/n (which defaults to `n`, so the
+swarm recipes were silently skipping the one step they exist for).
+
+**When you add a prompt, default it from the state key it writes.** Otherwise
+it is invisible to recipes and to `--redo`, and the omission is silent.
+
+### Gotcha: `state_load_answers` used to drop every `STEP_*` key
+
+Its key pattern was `^[A-Z_][A-Z0-9_]*=`, which does not match
+`STEP_docker_SELECTED` — the module-derived middle segment is lowercase. So
+the long-documented "put `STEP_<name>_SKIPPED=yes` in an answers file to turn
+a step off" did nothing at all. Now `^[A-Z_][A-Za-z0-9_]*=`: still uppercase-
+initial (that's what keeps stray shell from matching), lowercase permitted
+after.
+
+### Gotcha: `STEP_*_SKIPPED` is honoured BEFORE `configure_`, but only in auto modes
+
+`main.sh` checks the flag before calling `configure_`, so a seeded skip doesn't
+depend on what the module happens to default its own y/n to. It is gated on
+`RECIPE_MODE || NON_INTERACTIVE` on purpose: interactively, a step skipped
+earlier in the same state file is deliberately **re-asked** when the wizard
+resumes, so an operator who Ctrl+C'd can change their mind without `--redo`.
+
+### Gotcha: `--dry-run` writes to a scratch copy of state.env
+
+Pre-seeding is a write — `state_set` writes through to the file — so
+previewing a recipe used to leave all of its answers in `state.env` for the
+next real run to inherit silently. `main.sh` now loads the real state (the
+plan must reflect genuinely completed steps), then repoints `STATE_FILE` at a
+throwaway inside the same tmpfs directory. That trap-on-EXIT is the only one
+in the tree and removes only the scratch copy; the real `state.env` is still
+deleted solely by 99-finalize.
+
+`--dry-run` also skips `ensure_tmux` — it changes nothing, so there's no
+half-applied state for a dropped connection to strand, and re-execing a
+planning command into a new session puts its output where the operator isn't.
+
+### The dry-run plan announces pauses via `critical_prompts_<sfx>`
+
+Optional per-module hook, echoing one line per load-bearing confirmation the
+step would raise **given current state**. Conditional on purpose: 42's restart
+prompt only fires when containers are running, 25's only when the scope is
+`vpn_only`. Announcing a pause that won't happen is as misleading as hiding
+one that will — which is why `21-user` deliberately has no hook (its lockout
+guard is only reachable after an interactive "no" to a prompt that defaults to
+"yes", so it cannot fire under `--recipe`).
+
+### What a recipe must not contain
+
+Secrets and per-host identity. They go in the `# requires:` header instead,
+and `main.sh` reports missing ones before the first module runs — discovering
+at step 43 that there's no join token leaves the host hardened, firewalled and
+half-clustered, which is the worst place to stop.
+
+Host *facts* are likewise absent, but for a different reason: hostname,
+public interface, advertise address and node subnet are all derived from the
+running machine, which is what lets one file work unmodified on the next box.
+A recipe that hard-codes `SWARM_ADVERTISE_ADDR` is broken by definition.
+
+---
+
 ## State model
 
 `/run/hardenup/state.env` (0600, tmpfs) holds everything for the duration of the run:
@@ -83,6 +183,8 @@ Step 99's verify asserts that `/run/hardenup/` no longer exists. If deletion fai
 
 These pauses and rollbacks exist because specific real-world incidents would otherwise be unrecoverable without console access. Preserve them when editing.
 
+**The prompt-shaped ones go through `ask_confirm_critical`, never `ask_yesno`.** That is what keeps `--recipe` and `--non-interactive` from answering them: `ask_confirm_critical` ignores both modes and reaches the terminal anyway, and with no terminal it fails closed (returns "no" — roll back / don't restart) rather than guessing. Only `--unattended`, which `main.sh` makes the operator ask for by name, silences it. Current call sites: `21-user`'s no-user lockout guard, `24-ssh-harden`'s secondary-terminal confirm, `25-firewall`'s VPN-only scope, `42-docker-daemon`'s restart-with-containers-running. If you add a pause whose wrong answer costs the operator the box, use that function and give the module a `critical_prompts_<sfx>` hook so `--dry-run` announces it.
+
 ### `24-ssh-harden`: secondary-terminal confirm
 
 After writing `/etc/ssh/sshd_config.d/99-hardening.conf` and reloading sshd, the module pauses: *"Have you verified SSH access in another terminal?"* On `n`, it removes the drop-in file and reloads sshd before exiting. Removing this turns any sshd_config mistake (wrong port, broken PAM stack, typo'd key) into a permanent lockout on a remote box.
@@ -94,6 +196,8 @@ The run function: `ufw --force reset` → `default deny incoming` → **add SSH 
 ### `25-firewall`: SSH scope `vpn_only` is console-recovery-only
 
 When `SSH_SCOPE=vpn_only`, the wizard blocks SSH on the public interface AND inserts a targeted deny for the SSH port on the private interface (the private allow-all still covers non-SSH traffic). The only path in is `VPN_IFACE` (tailscale0 or wg*). If the VPN daemon crashes, the Tailscale account is locked out, the WireGuard peer config is wrong, or the coordination server is unreachable, recovery requires console/serial access from the hosting provider. The configure-time info lines warn about this and name providers that do/don't offer console (Hetzner: yes; verify others). Do not default this scope — it must be an explicit opt-in.
+
+Selecting it now costs a second `ask_confirm_critical`, on **every** route in including a recipe that seeded the key, and declining downgrades to `no_public` rather than aborting. The scope menu is also built from what the host actually has, so a seeded `vpn_only` on a box with no VPN is ignored instead of producing a firewall with no way in.
 
 ### `18-vpn`: WireGuard one-way egress block
 
@@ -295,7 +399,7 @@ Packages are opt-in (`--packages`) — removing `docker-ce` takes every containe
 
 ```bash
 find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
-shellcheck -x -S style main.sh lib.sh state.sh modules/*.sh
+shellcheck -x -S style main.sh lib.sh state.sh recipes.sh backup.sh undo.sh modules/*.sh
 grep -rn 'PROFILE' main.sh lib.sh state.sh modules/ README.md CLAUDE.md   # should be zero hits
 ```
 

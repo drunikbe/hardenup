@@ -74,8 +74,17 @@ state_init() {
 # The file is parsed as KEY=VALUE line-by-line; it is NEVER sourced. An
 # earlier implementation used `source` and was an arbitrary-code-execution
 # sink (CWE-94) because any bash in the file would run as root before any
-# validation could fire. Lines that don't match ^UPPER_UNDERSCORE= are
-# skipped, so operators can intersperse comments (`# ...`) freely.
+# validation could fire. Lines that don't look like an assignment to a key
+# starting with an uppercase letter are skipped, so operators can intersperse
+# comments (`# ...`) freely — and so can a recipe's `# description:` header.
+#
+# Gotcha: the key pattern must allow lowercase AFTER the first character.
+# Step-tracking keys are built from module filenames and carry the module's
+# own case — STEP_docker_SELECTED, STEP_ssh_harden_SKIPPED. A stricter
+# ^[A-Z_][A-Z0-9_]*= (what this used to be) silently dropped every one of
+# them, so the documented "put STEP_<name>_SKIPPED=yes in an answers file to
+# turn a step off" did nothing at all. It still has to START uppercase, which
+# is what keeps stray shell (`if [[ ... ]]`, `foo() {`) from matching.
 state_load_answers() {
     local file="$1"
     [[ -z "$file" ]] && { err "state_load_answers: no file given"; return 1; }
@@ -85,9 +94,11 @@ state_load_answers() {
     while IFS= read -r line; do
         # Skip blank lines and full-line comments.
         [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
-        # Only accept lines shaped like SHELL_LIKE_KEY=... — anything else
-        # (conditionals, function defs, command subst) is ignored silently.
-        [[ "$line" =~ ^[A-Z_][A-Z0-9_]*= ]] || continue
+        # Only accept lines shaped like Uppercase_First_KEY=... — anything
+        # else (conditionals, function defs, command subst) is ignored
+        # silently. See the header note on why lowercase is allowed after the
+        # first character.
+        [[ "$line" =~ ^[A-Z_][A-Za-z0-9_]*= ]] || continue
         key="${line%%=*}"
         value="${line#*=}"
         # Strip one layer of matching surrounding quotes (single or double).

@@ -101,9 +101,13 @@ _configure_docker() {
         state_set DOCKER_REMOVE_CONFLICTS no
     fi
 
+    # Default: yes when there's a user to add, unless state already says
+    # otherwise — a recipe that wants `sudo docker` everywhere sets
+    # DOCKER_ADD_USER=no and needs that to survive the prompt.
     local user default="n"
     user="$(state_get USER_NAME)"
     [[ -n "$user" ]] && default="y"
+    [[ "$(state_get DOCKER_ADD_USER)" == "no" ]] && default="n"
     if [[ -n "$user" ]]; then
         info "Docker-group membership lets '$user' run 'docker' without sudo — but"
         info "it's effectively root on this host: any member can run"
