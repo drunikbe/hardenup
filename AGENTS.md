@@ -1,0 +1,438 @@
+# CLAUDE.md
+
+Maintainer notes for this repo. User-facing docs are in `README.md`.
+
+This file focuses on non-obvious edges — contract, state lifecycle, load-bearing safety pauses, ordering constraints, and pitfalls that aren't visible from the file tree. Skim the relevant section before touching a module.
+
+---
+
+## Wizard model
+
+`main.sh` is a linear yes/no wizard. It walks `modules/NN-*.sh` in filename-sort order, and for each module:
+
+1. Checks `STEP_<name>_COMPLETED` in state. If set (and `--redo <name>` wasn't passed), prints `✓ <name> [done at <ts>]` and continues.
+2. `applies_<name>` — re-evaluated inline. If false, the step is invisible this run. `applies_` gates on state set by EARLIER modules (e.g. `STEP_docker_SELECTED=yes` makes 41-docker-firewall apply).
+3. `detect_<name>` — reads canonical config files to populate prompt defaults.
+4. `configure_<name>` — asks the operator's top-level Y/N + sub-questions. If Y/N is no, the module calls `state_mark_skipped <name>` and `configure_` returns; main.sh sees the flag and moves on.
+5. `run_<name>` — executes immediately. Per-step safety pauses live here.
+6. `verify_<name>` (or `check_<name>` as fallback) — reads canonical state to confirm the action persisted. If it fails, main.sh prints a clear error and exits non-zero WITHOUT marking the step completed. The operator fixes and re-runs; the wizard resumes at the failed step.
+7. `state_mark_completed <name>` — records completion with an ISO timestamp.
+
+There is no "configure-all-then-run-all" batch. Each step asks, executes, verifies, and moves on. Per-step safety pauses (SSH secondary-terminal confirm, UFW rule ordering) replace the old batch-summary confirmation.
+
+### Module contract
+
+Every `modules/NN-*.sh` defines:
+
+| Function | Required? | Side effects | When main.sh calls it |
+|----------|-----------|--------------|-----------------------|
+| `applies_<name>` | yes | none (pure read) | Every iteration; filters the step out when it shouldn't run. |
+| `detect_<name>` | yes (can be no-op) | reads canonical config; writes state | Before `configure_` each time the step is active. |
+| `configure_<name>` | yes (can be no-op) | prompts + writes state | After `detect_`. Must call `state_mark_skipped` if the operator declines. |
+| `check_<name>` | optional | reads canonical state | Not called by main.sh directly unless `verify_` is absent; used as the short-circuit check inside standalone-run scripts. |
+| `verify_<name>` | optional (falls back to `check_`) | reads canonical state | After `run_`. Must return 0 or the step is NOT marked completed. |
+| `run_<name>` | yes | writes canonical config files | After a non-skip `configure_`. Must be idempotent (`cat >` truncating writes, never `>>`). |
+
+Each module also has a trailing `if [[ "${BASH_SOURCE[0]}" == "${0}" ]]` block so it runs standalone: `./modules/25-firewall.sh` does its own `require_root → state_init → detect → configure → run → verify` cycle independent of main.sh.
+
+### Gotcha: function-name derivation
+
+`mod_func_suffix` strips the numeric prefix and replaces `-` with `_`:
+
+- `25-firewall` → `firewall`
+- `22-ssh-keygen` → `ssh_keygen`
+- `30-intrusion` → `intrusion`
+
+If you rename a module, rename all five of its functions. Otherwise main.sh silently skips it — there's no "function not found" error because main.sh uses `declare -F` to check existence.
+
+### Gotcha: `applies_` ordering
+
+`applies_<name>` is evaluated inline every iteration, so it can consult state set by earlier modules (e.g. `STEP_docker_SELECTED` set by 40-runtime's `configure_`). It CANNOT consult state set by the same module or any module with a HIGHER number — that state doesn't exist yet.
+
+This is how the profile gating was eliminated: `40-runtime.sh` unconditionally applies and is the single fork in the road — the operator picks Docker / Podman (or none). Downstream modules gate on the resulting flag: `41-docker-firewall.sh` applies when `STEP_docker_SELECTED=yes`. 40 sets the flag on the Docker path and unsets it on the others, so a `--redo 40-runtime` that switches platforms doesn't leak stale state to modules on the abandoned path.
+
+---
+
+## Recipes and prompt modes
+
+`recipes/<name>.recipe` is a curated answers file that ships with the tool.
+`recipes.sh` finds and loads them; `main.sh --recipe <name>` applies one.
+Nothing about a recipe is a new execution path — it seeds state through the
+same `state_load_answers` that `--answers` uses, and every module runs exactly
+as it would interactively.
+
+### The three prompt modes are not one dial
+
+`lib.sh` reads three independent flags. Conflating them is how a preset
+becomes a lockout:
+
+| Flag | Ordinary prompts | `ask_input` with NO default | `ask_confirm_critical` |
+|------|------------------|-----------------------------|------------------------|
+| *(none)* | asked | asked | asked |
+| `RECIPE_MODE=1` | take default | **asked** | asked |
+| `NON_INTERACTIVE=1` | take default | hard error naming the key | asked |
+| `UNATTENDED=1` | (unchanged) | (unchanged) | take default |
+
+The load-bearing row is `RECIPE_MODE`'s middle cell. A prompt whose default is
+non-empty has been answered by the recipe (the recipe seeded the state key the
+prompt defaults from); a prompt with *no* default is one the recipe
+deliberately declined to carry — a per-host secret — so it falls through and
+asks a human. That single rule is what makes "answers what it defines, stops
+for what it doesn't" fall out of the existing prompt helpers instead of
+needing a parallel prompting path.
+
+`UNATTENDED` is orthogonal and additive: it changes nothing except the
+confirmations. `main.sh` refuses it without `--non-interactive`, and refuses it
+outright while `24-ssh-harden` is in the plan.
+
+### Gotcha: a recipe can only steer a prompt whose default comes from state
+
+`ask_yesno "Open HTTP/HTTPS?" "y"` with a hard-coded default ignores whatever
+the recipe put in `FIREWALL_OPEN_HTTP` — recipe mode takes the *default*, not
+the state key. Four prompts had to be converted to the
+`[[ "$(state_get KEY)" == ... ]] && default=...` idiom before the shipped
+recipes worked: 25's HTTP toggle, 25's SSH-scope `ask_choice`, 40's
+docker-group toggle, and 43's top-level y/n (which defaults to `n`, so the
+swarm recipes were silently skipping the one step they exist for).
+
+**When you add a prompt, default it from the state key it writes.** Otherwise
+it is invisible to recipes and to `--redo`, and the omission is silent.
+
+### Gotcha: `state_load_answers` used to drop every `STEP_*` key
+
+Its key pattern was `^[A-Z_][A-Z0-9_]*=`, which does not match
+`STEP_docker_SELECTED` — the module-derived middle segment is lowercase. So
+the long-documented "put `STEP_<name>_SKIPPED=yes` in an answers file to turn
+a step off" did nothing at all. Now `^[A-Z_][A-Za-z0-9_]*=`: still uppercase-
+initial (that's what keeps stray shell from matching), lowercase permitted
+after.
+
+### Gotcha: `STEP_*_SKIPPED` is honoured BEFORE `configure_`, but only in auto modes
+
+`main.sh` checks the flag before calling `configure_`, so a seeded skip doesn't
+depend on what the module happens to default its own y/n to. It is gated on
+`RECIPE_MODE || NON_INTERACTIVE` on purpose: interactively, a step skipped
+earlier in the same state file is deliberately **re-asked** when the wizard
+resumes, so an operator who Ctrl+C'd can change their mind without `--redo`.
+
+### Gotcha: `--dry-run` writes to a scratch copy of state.env
+
+Pre-seeding is a write — `state_set` writes through to the file — so
+previewing a recipe used to leave all of its answers in `state.env` for the
+next real run to inherit silently. `main.sh` now loads the real state (the
+plan must reflect genuinely completed steps), then repoints `STATE_FILE` at a
+throwaway inside the same tmpfs directory. That trap-on-EXIT is the only one
+in the tree and removes only the scratch copy; the real `state.env` is still
+deleted solely by 99-finalize.
+
+`--dry-run` also skips `ensure_tmux` — it changes nothing, so there's no
+half-applied state for a dropped connection to strand, and re-execing a
+planning command into a new session puts its output where the operator isn't.
+
+### The dry-run plan announces pauses via `critical_prompts_<sfx>`
+
+Optional per-module hook, echoing one line per load-bearing confirmation the
+step would raise **given current state**. Conditional on purpose: 42's restart
+prompt only fires when containers are running, 25's only when the scope is
+`vpn_only`. Announcing a pause that won't happen is as misleading as hiding
+one that will — which is why `21-user` deliberately has no hook (its lockout
+guard is only reachable after an interactive "no" to a prompt that defaults to
+"yes", so it cannot fire under `--recipe`).
+
+### What a recipe must not contain
+
+Secrets and per-host identity. They go in the `# requires:` header instead,
+and `main.sh` reports missing ones before the first module runs — discovering
+at step 43 that there's no join token leaves the host hardened, firewalled and
+half-clustered, which is the worst place to stop.
+
+Host *facts* are likewise absent, but for a different reason: hostname,
+public interface, advertise address and node subnet are all derived from the
+running machine, which is what lets one file work unmodified on the next box.
+A recipe that hard-codes `SWARM_ADVERTISE_ADDR` is broken by definition.
+
+---
+
+## State model
+
+`/run/hardenup/state.env` (0600, tmpfs) holds everything for the duration of the run:
+
+- Operator answers (hostname, user name, SSH key, ports, CIDRs).
+- Generated secrets and keys (SSH Ed25519 pubkey; Swarm join tokens once 42 lands).
+- Step flags: `STEP_<name>_SELECTED`, `STEP_<name>_COMPLETED`, `STEP_<name>_COMPLETED_AT`, `STEP_<name>_SKIPPED`, `STEP_<name>_SKIPPED_AT`.
+
+### Gotcha: the state file is NOT trap-cleaned
+
+The previous iteration of this repo had `trap state_cleanup EXIT` in main.sh. That's gone. The state file is deleted ONLY by the terminal `99-finalize.sh` step after a clean run — not by Ctrl+C, not by a failed step, not by `set -e` tripping. That's how resume works.
+
+### Gotcha: secrets live in state.env during the run
+
+State.env holds secrets while the wizard is running. The terminal `99-finalize.sh` prints them to stdout for the operator to copy, then wipes the file. There is no separate `/root/platform-credentials.txt` — this was intentionally removed. If the operator misses the stdout dump, the secrets are still retrievable from their canonical locations:
+
+- SSH host key: `~/.ssh/id_ed25519.pub`.
+
+Step 99's verify asserts that `/run/hardenup/` no longer exists. If deletion fails, the wizard exits non-zero with a loud message — secrets on tmpfs are still gone at reboot, but manual cleanup is safer.
+
+### Gotcha: `/run` is tmpfs
+
+`/run/hardenup/state.env` disappears on reboot. If the operator expects to interrupt the wizard and continue across a full machine reboot, they have to re-walk completed steps. Acceptable tradeoff — tmpfs is the right home for mid-run secrets.
+
+---
+
+## Load-bearing safety checks — DO NOT REMOVE
+
+These pauses and rollbacks exist because specific real-world incidents would otherwise be unrecoverable without console access. Preserve them when editing.
+
+**The prompt-shaped ones go through `ask_confirm_critical`, never `ask_yesno`.** That is what keeps `--recipe` and `--non-interactive` from answering them: `ask_confirm_critical` ignores both modes and reaches the terminal anyway, and with no terminal it fails closed (returns "no" — roll back / don't restart) rather than guessing. Only `--unattended`, which `main.sh` makes the operator ask for by name, silences it. Current call sites: `21-user`'s no-user lockout guard, `24-ssh-harden`'s secondary-terminal confirm, `25-firewall`'s VPN-only scope, `42-docker-daemon`'s restart-with-containers-running. If you add a pause whose wrong answer costs the operator the box, use that function and give the module a `critical_prompts_<sfx>` hook so `--dry-run` announces it.
+
+### `24-ssh-harden`: secondary-terminal confirm
+
+After writing `/etc/ssh/sshd_config.d/99-hardening.conf` and reloading sshd, the module pauses: *"Have you verified SSH access in another terminal?"* On `n`, it removes the drop-in file and reloads sshd before exiting. Removing this turns any sshd_config mistake (wrong port, broken PAM stack, typo'd key) into a permanent lockout on a remote box.
+
+### `25-firewall`: UFW rule ordering
+
+The run function: `ufw --force reset` → `default deny incoming` → **add SSH rule** → allow-all on private → `ufw --force enable`. Reordering to enable UFW before the SSH allow rule locks the operator out mid-script.
+
+### `25-firewall`: SSH scope `vpn_only` is console-recovery-only
+
+When `SSH_SCOPE=vpn_only`, the wizard blocks SSH on the public interface AND inserts a targeted deny for the SSH port on the private interface (the private allow-all still covers non-SSH traffic). The only path in is `VPN_IFACE` (tailscale0 or wg*). If the VPN daemon crashes, the Tailscale account is locked out, the WireGuard peer config is wrong, or the coordination server is unreachable, recovery requires console/serial access from the hosting provider. The configure-time info lines warn about this and name providers that do/don't offer console (Hetzner: yes; verify others). Do not default this scope — it must be an explicit opt-in.
+
+Selecting it now costs a second `ask_confirm_critical`, on **every** route in including a recipe that seeded the key, and declining downgrades to `no_public` rather than aborting. The scope menu is also built from what the host actually has, so a seeded `vpn_only` on a box with no VPN is ignored instead of producing a firewall with no way in.
+
+### `18-vpn`: WireGuard one-way egress block
+
+When an operator picks WireGuard and answers `y` to the one-way prompt (default), the module injects `PostUp`/`PreDown` iptables rules into the `[Interface]` section of the pasted config:
+
+```
+PostUp  = iptables -A OUTPUT -o <iface> -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+PostUp  = iptables -A OUTPUT -o <iface> -j DROP
+```
+
+Semantics: peer-initiated connections to the server work (inbound creates a conntrack entry; responses match ESTABLISHED); server-initiated connections to the peer are dropped. Matches the "home router NAT" model — the UniFi case the feature was designed for. Side effects: DNS-over-tunnel stops working in this mode (if the pasted config sets `DNS = 192.168.1.1`, the VPS can't reach it). If an operator later installs a monitoring agent or similar that needs outbound tunnel access, they must re-run `--redo 18-vpn` and answer `n` to the one-way prompt, OR whitelist the specific destination via a narrower PostUp rule.
+
+### `42-docker-daemon`: daemon.json is MERGED, and log opts need a full restart
+
+Two things here are easy to get wrong.
+
+**Merge, don't truncate.** This is the one module that deliberately breaks the
+"idempotent by overwrite" convention. `/etc/docker/daemon.json` is a shared
+file — operators and other tooling put registry mirrors, insecure-registries,
+proxies and address pools in it. A truncating `cat >` would silently delete
+them, and the breakage (image pulls failing against an internal registry)
+shows up far from the cause. Only `log-driver` and the two `log-opts` keys
+this module owns are replaced; the rest is preserved. Invalid JSON is a hard
+refusal, not a rewrite.
+
+**`log-driver`/`log-opts` are not reloadable.** `systemctl reload docker`
+(SIGHUP) does NOT apply them — verified on Ubuntu 26.04 / Docker 29.6.2: a
+container created after a reload still had an empty `LogConfig.Config`. Only
+a full restart works, and a restart stops running containers, because
+`live-restore` is deliberately unset (it is incompatible with Swarm mode —
+dockerd refuses to start with both). Hence the confirm pause in `run_` when
+containers are running. Rotation applies to containers created AFTER the
+restart; existing ones keep the config they were created with.
+
+Also: `systemctl reset-failed` runs before the restart. systemd rate-limits
+unit starts, so a few `--redo` runs in quick succession leave docker in
+`failed (start-limit-hit)` and refuse every later restart until the counter
+clears.
+
+### `40-runtime` / `41-docker-firewall`: Docker bypasses UFW
+
+Docker's daemon inserts its own rules into `iptables FORWARD` that run BEFORE UFW's rules, so bound container ports become reachable from the public internet even when UFW default-deny is set. 41 fixes this by installing explicit rules in the `DOCKER-USER` chain: allow RELATED/ESTABLISHED and the trusted node subnets, then drop. If 41 is skipped, any `docker run -p 80:80` exposes the container publicly regardless of UFW state. Do not let anyone "simplify" this module away.
+
+### `40-runtime`: don't remove docker.com's own packages as "conflicts"
+
+`DOCKER_CONFLICTING_PKGS` is docker.com's official uninstall-first list. The trap is the near-namesakes: Ubuntu's `containerd` and `docker-buildx` **do** conflict, while docker.com's `containerd.io`, `docker-buildx-plugin` and `docker-compose-plugin` are the packages we just asked for. Adding the latter to that array would uninstall the runtime mid-install. Verified on 26.04 that the detector reports nothing on a healthy docker-ce host.
+
+Removal is gated on `DOCKER_REMOVE_CONFLICTS`, answered in `configure_`, and only prompted when something actually conflicts — uninstalling software silently would break the module contract, and prompting on a clean host would be pure friction. The removed list is `record_note`'d because undo can restore files but cannot reinstate a package it never installed.
+
+### `40-runtime`: key/repo format migration is one-way and must clean up
+
+The module writes `/etc/apt/keyrings/docker.asc` + `/etc/apt/sources.list.d/docker.sources` (deb822), matching current official docs. Hosts provisioned by older hardenup have `docker.gpg` + `docker.list`. Both are removed after the new pair is written — leaving them declares the same repo twice and every apt run then prints "Target Packages is configured multiple times". They're `backup_file`'d first, so undo can restore either shape.
+
+Incidentally the `.asc` form is why the `gpg --batch --yes` workaround is gone: `curl -o` overwrites on its own, so there is no "File exists" crash to defend against.
+
+### `41-docker-firewall`: the DROP must stay scoped to the public interface
+
+`DOCKER-USER` sits in `FORWARD`, which carries **both** directions of container traffic. An unqualified `-j DROP` therefore kills container **egress** too — a new outbound connection matches neither RETURN rule. This module used to do exactly that, and on a single-NIC host (where 15-networks finds no private network, so there was no allow rule at all) it broke every container's outbound networking, DNS included.
+
+Verified on Ubuntu 26.04 / Docker 29.6.2: `docker run alpine wget https://...` failed with `bad address`, the DROP counter advanced, and deleting the rule fixed it instantly.
+
+That is fatal for this stack in particular: ingress is a Cloudflare Tunnel, and `cloudflared` works by dialling **out**. A rule that blocks container egress blocks the entire ingress path. Keep the `-i <public iface>` qualifier. When `NET_PUBLIC_IFACE` is unset the module deliberately installs **no** drop at all rather than an unscoped one.
+
+Related: the rule flush deletes by **line number** matched on the rule comment, not by rule spec. `iptables -D` needs the complete spec, so a spec carrying only the comment silently fails to match a rule that also has `-m conntrack ...` or `-s <cidr>` — which is why the old drain loops accumulated duplicate RETURNs on every re-run.
+
+### `41-docker-firewall`: 26.04 has no iptables-persistent
+
+Ubuntu 26.04 dropped **both** `iptables-persistent` and `netfilter-persistent` from the archive — verified on `resolute` with main/restricted/universe/multiverse enabled: no installation candidate for either, and nothing else provides the service. The old code called them unconditionally, printed "has no installation candidate", fell through to `iptables-save > /etc/iptables/rules.v4` against a directory that didn't exist, and left the DOCKER-USER rules alive only until the next reboot — i.e. the firewall silently stopped existing after a restart.
+
+41 now installs its own `hardenup-iptables.service` that restores `/etc/iptables/rules.v4` at boot, ordered `Before=docker.service` (Docker creates `DOCKER-USER` at startup; restoring into a chain it hasn't made yet fails). `iptables` on 26.04 is the nft backend and `iptables-save`/`restore` round-trip correctly through it.
+
+### `29-unattended`: drop-in, never rewrite the distro's apt config
+
+Ubuntu ships unattended-upgrades installed, enabled and configured — on 26.04 the package is `ii`, the timer is active, and `50unattended-upgrades` already carries `Allowed-Origins` (both ESM origins included), `Package-Blacklist` and `DevRelease`. This module used to `cat >` over that file, destroying all of it.
+
+It now writes only `/etc/apt/apt.conf.d/52-hardenup-unattended`. apt reads the directory in lexical order and later assignments win for **scalar** options, so a file sorting after `50` overrides exactly what we care about and leaves the rest alone. `20auto-upgrades` is likewise untouched.
+
+`Allowed-Origins` is deliberately NOT set there. It is a **list**, where `Foo:: "x"` appends rather than replaces, the distro default is already the correct security+ESM set, and a botched override silently stops security patching. Verified on 26.04 that our scalars take effect while all four distro `Allowed-Origins` entries survive — check with `apt-config dump`, which shows the merged effective config, not any single file.
+
+`run_` validates its own output with `apt-config dump` and deletes the drop-in if it doesn't parse: a broken file in `apt.conf.d` breaks *every* apt command on the host, which is a far bigger outage than missing patches.
+
+Auto-reboot defaults to **n**. 29 runs long before the swarm choice at 43, so it cannot infer whether this host is a cluster manager, and three managers rebooting together at 04:00 lose Raft quorum. An unplanned quorum loss beats a delayed kernel patch, so the safe answer is the default.
+
+### `30-intrusion`: no `curl | bash`, and the bouncer flavour is a choice
+
+CrowdSec's repo used to be set up by piping `install.crowdsec.net` into root bash — 418 lines, unverified, unpinned, and the only place in this repo that ran an unchecked remote script. It is now done inline: import the key, write a deb822 `.sources`, `apt-get update`.
+
+Worth knowing: CrowdSec's repo path is `.../crowdsec/any/ any main` — **distro-agnostic**, unlike docker.com's per-codename suites. There is no 404-on-a-new-release risk here, and no codename probe is needed. Verified installing cleanly on 26.04 (`resolute`), a suite packagecloud has never heard of.
+
+The bouncer is `crowdsec-firewall-bouncer-iptables`, not the nftables variant, on purpose. 26.04's iptables *is* the nft backend, so the iptables bouncer writes nftables rules underneath anyway — and 41-docker-firewall manages DOCKER-USER through iptables too. Mixing an nft-native bouncer with iptables-nft rule management means two tools writing the same tables in different dialects, which surfaces as rules invisible from whichever command you happen to run. The nftables package resolves fine if that tradeoff is ever revisited.
+
+### `25-firewall` owns the Swarm cluster ports
+
+2377/tcp, 7946/tcp+udp and 4789/udp are declared in 25-firewall, not in 43-docker-swarm, for the same reason the VPN interface rule lives there: `run_firewall` begins with `ufw --force reset`, so a rule added by any later module is wiped the next time someone runs `--redo 25-firewall`. All UFW state is co-located.
+
+They are scoped to `SWARM_NODE_CIDR`, validated with `validate_private_cidr` so a wildcard answer is impossible. An internet-reachable 2377 plus a leaked join token is a whole-cluster takeover.
+
+Note that on a single-NIC LAN host — the Pi cluster, most homelabs — 15-networks reports `NET_HAS_PRIVATE=no`, because "private" means *RFC1918 on a non-default-route interface*. Such a host still has a perfectly good node subnet; it just isn't in `NET_PRIVATE_CIDR`, which is why the swarm prompt falls back to the public interface's own subnet rather than reusing the private one.
+
+### `43-docker-swarm`: Raft quorum
+
+Swarm managers form a Raft group with quorum `floor(N/2)+1`. **Two managers tolerate zero failures and are strictly worse than one** — either node dying takes the control plane down. Go 1 → 3 and never linger on 2. Managers must join one at a time, waiting for `Ready`; workers have no Raft membership and can join in parallel. A manager reboot is a quorum event, which is why 29-unattended tells swarm managers to decline auto-reboot.
+
+
+---
+
+## Ordering and gating constraints
+
+- **Execution order is filename-glob sort.** Don't rename existing modules; gaps in numbering (11–14, 16–17, 42–65, 67–98) are intentional reserve slots for insertions. 50–79 became free when the web-server/TLS modules and the RKE2 platform stack moved off this tree — reuse those numbers only for work that genuinely belongs that late in the run.
+- **There is no host reverse proxy and no host-managed TLS.** Ingress is a Cloudflare Tunnel (`cloudflared` as a container, outbound-only, TLS terminated at the CF edge). Modules 50–54 (webserver-choice / nginx / apache / openresty / tls-certs) were removed for this reason — see `docs/roadmap.md`. Don't reintroduce an ACME client or a vhost-writing module without revisiting that decision; a tunnel-fronted host has no inbound port for HTTP-01 to answer on.
+- **`10` is free since the PROFILE module was deleted.** Available for a future always-first module if needed.
+- **`15-networks` runs before any network-aware module.** 25-firewall, 30-intrusion, 41-docker-firewall all consult `NET_PUBLIC_*` / `NET_PRIVATE_*`.
+- **`18-vpn` runs before 24-ssh-harden and 25-firewall on purpose.** Installing a VPN early lets those modules offer VPN-aware options conditional on `VPN_ENABLED=yes` / `VPN_KIND`: 24 may enable Tailscale SSH (ONLY when `VPN_KIND=tailscale` — WireGuard has no equivalent since it's a protocol, not an identity system), and 25 exposes the SSH scope selector (anywhere / no_public / vpn_only). Operators who decline a VPN at 18 see neither sub-prompt. 25-firewall writes the `allow in on ${VPN_IFACE}` rule itself so the `ufw --force reset` doesn't clobber it — VPN trust is co-located with the rest of the UFW state. State schema: `VPN_KIND` ∈ {none, tailscale, wireguard}, `VPN_IFACE` ∈ {"", tailscale0, wg0 or operator-chosen}; `VPN_ENABLED` is a convenience flag. The old `TAILSCALE_ENABLED` key is auto-migrated at detect time for re-runs against existing state.
+- **`30-intrusion` asks its y/n AND picks fail2ban vs crowdsec in a single step.** Replaces the former three-file split (30-security-choice + 31-fail2ban + 32-crowdsec-host) — one module = one wizard step.
+- **`40-runtime` is the single container-platform fork** (Docker / Podman / none, mutually exclusive). Picking Docker sets `STEP_docker_SELECTED=yes`, which gates 41-docker-firewall. Kubernetes (RKE2) used to be a third option pulling in a 60-79 platform stack; that path is preserved on the `k8s` branch — see `docs/roadmap.md`.
+- **26-sysctl is runtime-agnostic** and writes only the hardening baseline; it deliberately does not set `ip_forward`. 41-docker-firewall writes the Docker-specific forwarding/bridge sysctls.
+- **41, 42 (and 43 when it lands) all gate on `STEP_docker_SELECTED=yes`.** They are the Docker-only tail of the runtime fork; an operator who picked Podman or none never sees them.
+
+---
+
+## Reversibility (backup.sh / undo.sh)
+
+`lib.sh` sources `backup.sh` at the end, so **every module already has** `backup_file`, `backup_dir_files`, `record_pkg_installed`, `record_service_enabled`, `record_user_created` and `record_note`. Don't add per-module source lines — retrofitting 21 headers is 21 chances to forget one, and a module that silently skips its backup is exactly the failure this prevents.
+
+### The rule
+
+**Call `backup_file <path>` immediately before any write to a path the module didn't create this run.** It is idempotent and cheap. The `record_*` helpers must be called BEFORE the thing they describe — each one skips targets that already exist, which is how undo knows never to remove a package, service or user the operator already had.
+
+### Gotcha: first touch is global, not per-run
+
+The original is stored only if no copy exists yet, keyed by absolute path across **all** runs. Per-run backups would mean a second run captures the first run's already-modified file and labels it "original" — after two runs the pristine version is gone. Since `run_` functions are idempotent and re-run freely via `--redo`, that would happen constantly. First copy wins, never overwritten. Verified: three runs of 42-docker-daemon with different values, and the stored original was still the pre-hardenup content.
+
+### Gotcha: the manifest is TSV, not JSON
+
+JSON from bash means jq, and jq is installed by 23-packages — which runs *after* 15/18/20/21/22. A backup library that can't record anything until a third of the wizard has run is useless. TSV needs only the shell. `_mf_append` refuses any value containing a tab rather than writing a row undo would misparse.
+
+### Gotcha: both stores live outside /run
+
+`/run` is tmpfs. A record of what changed must outlive the run that made it — and step 99 deletes the state dir on purpose. Hence `/var/backups/hardenup/` and `/var/lib/hardenup/`, both 0700/0600 (originals can contain secrets; the manifest reveals the host's whole hardening posture).
+
+### What undo deliberately won't do
+
+Packages are opt-in (`--packages`) — removing `docker-ce` takes every container with it. Users are never deleted (`userdel -r` destroys a home directory). Ubuntu Pro attachment and Swarm membership are `record_note` only, because both have effects off this machine: a seat consumed on the Canonical account, a node entry in the cluster's Raft state. Undo prints these for a human instead of guessing.
+
+---
+
+## Conventions
+
+- **Idempotent by overwrite.** Every module that writes a config file uses `cat > file <<EOF` (truncating write), never `>>` (append). Re-running produces identical end state.
+- **Prefer what's already installed; don't add a second implementation.** Before adding a package, check `apt-cache show <pkg> | grep Priority`. `required`/`important`/`standard` means Ubuntu already ships it and installing it is noise. Check harder if the package *duplicates* something preinstalled: `net-tools` was installed for years while every network read in this repo used `ip` from `iproute2` (priority=important), and `apt-transport-https` is a dummy transitional package because apt has done https natively for years. Both are gone — don't reintroduce them.
+
+  Where a *category* of tool may already be present, detect rather than dictate. `28-timezone` accepts chrony, timesyncd, ntpsec or ntp and installs only when none is there, because two NTP daemons fighting over the clock is worse than none. Same reasoning applies to anything else with interchangeable implementations.
+
+  When a package genuinely is needed, install only what's missing (`dpkg -s` first) so a stock image doesn't pay for an apt round-trip on every run, and call `record_pkg_installed` before installing so undo knows it was ours.
+- **One responsibility per module.** If you're adding two unrelated things to a module, split it. Numbering has reserve slots specifically for insertion.
+- **Shared helpers live in `lib.sh`.** Don't reinvent `ask_*`, `validate_*`, `detect_*`, `wait_for`, `require_root`, `ensure_tmux` in modules. Add to `lib.sh` if a pattern reappears.
+- **Inline rationale, not WHAT.** Module headers explain WHY a config choice exists (load-bearing reasons, incident history, upstream-bug references). Don't repeat what the next five lines of bash obviously do.
+- **Standalone-run scripts should also verify.** Each module's trailing `if [[ "${BASH_SOURCE[0]}" == "${0}" ]]` block should call `verify_<name>` (or `check_<name>`) after `run_` and exit non-zero if it fails. Copy the pattern from 25-firewall.
+- **Prompt labels explain the input format.** New `ask_input` calls should include a format/example hint in parentheses when the expected input isn't obvious from the label alone (good: `"Server URL (e.g. https://host:6443)"`, bad: bare `"Hostname"`). A bare label is acceptable only when the `[default]` value itself communicates the type. Same rule applies to `ask_yesno` for module-level "install X?" prompts — name the tool or stack in parentheses when the label doesn't already (good: `"Enable host-level intrusion detection (fail2ban/crowdsec)?"`, bad: bare `"Enable host-level intrusion detection?"`). This is soft-enforced via review — no CI check yet.
+- **Sub-prompts explain the concept when the label can't.** When a sub-prompt asks for something whose *purpose* isn't obvious from the label alone (e.g. `"Private CIDR (for allow-lists)"`, `"Load balancer private IP"`, `"Email address for Let's Encrypt"`), precede it with 1-4 `info` lines explaining what the value is used for downstream and any non-obvious gotchas (platform-specific defaults, rate limits, jargon unpacked). Skip when the label and default already answer "what do I type and why does it matter?" (e.g. `"Hostname (short name or FQDN) [dev-apps]"` is self-explanatory). Don't duplicate the top-of-module `info` lines — those explain the step; these explain the specific field.
+- **Every module must ask permission.** `configure_<name>` is where this happens. The shape is non-negotiable, applied uniformly across all 39+ modules:
+
+  1. One to two `info "..."` lines describing what the step does and how it relates to neighbouring steps.
+  2. An `ask_yesno "<prompt with tool/stack named in parens>?" "<default>"` gate.
+  3. On decline: `state_mark_skipped <name>` then `return 0`.
+  4. On accept: the module's sub-questions and state writes follow.
+
+  Reject the temptation to make any step "silent because the default is obviously correct". The principle is *visibility over brevity*: operators should never discover, mid-wizard, that a step has already committed a change they didn't see. Modules that represent "the operator already consented upstream" (e.g. `41-docker-firewall` after picking Docker at 40) still get the same info + y/n, just with default=`y` — the prompt exists for visibility, not to add friction.
+
+  Example (`25-firewall.sh:34-39`):
+  ```bash
+  configure_firewall() {
+      info "Host packet filter: default-deny incoming, allow SSH + selected ports."
+      info "Complements (not replaces) intrusion detection in the next step."
+      if ! ask_yesno "Configure host firewall (ufw)?" "y"; then
+          state_mark_skipped firewall
+          return 0
+      fi
+      # sub-questions here
+  }
+  ```
+
+  Audit command:
+  ```bash
+  for f in modules/*.sh; do
+      name=$(basename "$f" .sh); sfx=${name#*-}; sfx=${sfx//-/_}
+      body=$(awk "/^configure_${sfx}\(\) \{/,/^}/" "$f")
+      info_n=$(echo "$body" | grep -c '^\s*info ')
+      yn=$(echo "$body"   | grep -c 'ask_yesno')
+      [[ "$info_n" -ge 1 && "$yn" -ge 1 ]] || echo "FAIL $name (info=$info_n yesno=$yn)"
+  done
+  ```
+
+  A passing run prints nothing. A failing module is blocked from merge until the convention is applied.
+
+## Validation commands
+
+**Run these locally before committing any shell-file change.** `.github/workflows/lint.yml` runs the same two checks on every push and PR to `main`; a red CI run blocks the merge. Catching lint failures locally is cheaper than pushing and waiting for CI.
+
+```bash
+find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -n1 bash -n
+shellcheck -x -S style main.sh lib.sh state.sh recipes.sh backup.sh undo.sh modules/*.sh
+grep -rn 'PROFILE' main.sh lib.sh state.sh modules/ README.md CLAUDE.md   # should be zero hits
+```
+
+Notes on the flags:
+
+- `bash -n` is a pure parse pass — catches unclosed quotes, missing `fi`/`done`, malformed heredocs. No side effects.
+- `shellcheck -x` follows `source` directives, but each module uses `# shellcheck source=/dev/null` because they source `lib.sh` via a computed variable path (`${MODULE_DIR}/../lib.sh`) that shellcheck can't statically resolve. That's why all four files (`main.sh`, `lib.sh`, `state.sh`, `modules/*.sh`) are passed explicitly — each gets analyzed independently. Don't try to "fix" the `/dev/null` directive with `source-path=SCRIPTDIR`; it breaks when shellcheck is invoked with a changed CWD.
+- `-S style` is the strictest default severity. The repo is clean at this level today and CI enforces it. Don't suppress warnings to manufacture a green run — fix the underlying issue.
+
+If you introduced a change that cannot pass lint (e.g. an intentional style exception), add a scoped `# shellcheck disable=SC####` with a one-line comment explaining why. Wholesale suppression (`--exclude=...` in the workflow, wrapping in `|| true`) is not acceptable.
+
+## Git
+
+- **Only commit when asked.** If unclear, ask.
+- **Conventional commits.** `feat:` / `fix:` / `chore:` / `refactor:` / `docs:` prefixes. Imperative mood, one blank line after the subject.
+- **Never `--amend` after a pre-commit hook fails.** The commit didn't happen; fix the issue, re-stage, make a new commit.
+- **Never force-push main.** Warn the user if they ask.
+- **Don't stage unrelated files.** Check `git status` before `git add -A`.
+
+## Verification discipline
+
+Report outcomes faithfully. If shellcheck fails, say so with the output — do not suppress warnings to manufacture a green run. If you didn't run a target VM and can't confirm runtime behavior, say that — don't imply it "worked" based on static checks alone. Static checks validate code correctness, not feature correctness.
+
+## File & function size
+
+- Files: aim under 500 LOC. Split anything over 800.
+- Functions: aim under 100 LOC. Refactor before modifying anything over 200.
+- Optimize for cohesion (one responsibility per file) and readability over compactness.
+
+## Large-file reads
+
+When reading files over 500 lines, use `offset` and `limit` with the `Read` tool. A single read of a 1000-line file may truncate.
+
+## Search completeness
+
+When renaming a function / variable / type, search for: direct calls, string literals, re-exports, barrel files, test mocks. A single grep is insufficient.

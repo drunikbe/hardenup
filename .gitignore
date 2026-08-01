@@ -2,3 +2,6 @@
 *.swp
 *.swo
 *~
+
+# graphify graph (generated locally)
+graphify-out/
