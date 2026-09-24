@@ -419,6 +419,27 @@ If you introduced a change that cannot pass lint (e.g. an intentional style exce
 - **Never force-push main.** Warn the user if they ask.
 - **Don't stage unrelated files.** Check `git status` before `git add -A`.
 
+## Worktrees — one lane, always
+
+Every session — feature, chore or one-line fix — works in its own worktree under `.worktrees/`
+(git-ignored), never in the main checkout. The main checkout stays on `develop` and moves only by
+`git pull --ff-only`: a branch parked there is how parallel sessions commit onto each other's work.
+Every change reaches `develop` by a PR. The why: vault `knowledge/developer/stack/git-and-prs.md`.
+
+```bash
+git status -sb && git pull --ff-only             # main checkout: sync only, never commit here
+git worktree prune && git fetch -q --prune origin
+git worktree add --lock --reason "$(hostname -s)" .worktrees/<slug> -b <type>/<slug> origin/develop
+cd .worktrees/<slug>                             # work and commit here
+git push -u origin HEAD && gh pr create --base develop --fill
+gh pr merge --rebase --delete-branch
+cd - && git pull --ff-only
+git worktree unlock .worktrees/<slug> && git worktree remove .worktrees/<slug> && git branch -D <type>/<slug>
+```
+
+A locked worktree you did not create belongs to another session — leave it. `.claude/worktrees/` is
+Claude Code's own subagent isolation and is managed by the harness.
+
 ## Verification discipline
 
 Report outcomes faithfully. If shellcheck fails, say so with the output — do not suppress warnings to manufacture a green run. If you didn't run a target VM and can't confirm runtime behavior, say that — don't imply it "worked" based on static checks alone. Static checks validate code correctness, not feature correctness.

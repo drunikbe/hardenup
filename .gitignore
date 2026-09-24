@@ -5,3 +5,6 @@
 
 # graphify graph (generated locally)
 graphify-out/
+
+# per-session git worktrees (see AGENTS.md)
+.worktrees/
